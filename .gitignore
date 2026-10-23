@@ -28,3 +28,4 @@ __pycache__/
 
 # Download archive
 *.tar.gz
+*.zip
