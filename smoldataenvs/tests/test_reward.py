@@ -1,0 +1,94 @@
+from types import SimpleNamespace
+
+import pytest
+
+from pirl.reward import correctness_only, reward_value, rollout_reward
+
+
+def test_unscorable_is_none_not_wrong():
+    assert reward_value(None, 3) is None
+
+
+@pytest.mark.parametrize("calls", [0, 5, 30, 100])
+def test_wrong_answers_get_no_bonus(calls):
+    assert reward_value(0.0, calls) == 0.0
+
+
+def test_bonus_shrinks_with_tool_calls():
+    assert reward_value(1.0, 0) == pytest.approx(1.1)
+    assert reward_value(1.0, 15) == pytest.approx(1.05)
+    assert reward_value(1.0, 30) == pytest.approx(1.0)
+    assert reward_value(1.0, 60) == pytest.approx(1.0)  # clipped at zero, never below correctness
+    assert reward_value(1.0, 3) > reward_value(1.0, 10)
+
+
+def test_bonus_bounded_by_point_one():
+    assert all(1.0 <= reward_value(1.0, n) <= 1.1 for n in range(0, 50))
+
+
+def test_unknown_call_count_still_rewards_correctness():
+    assert reward_value(1.0, None) == 1.0
+
+
+def test_outcome_hooks():
+    right = SimpleNamespace(env_reward=1.0, tool_call_count=6)
+    wrong = SimpleNamespace(env_reward=0.0, tool_call_count=1)
+    broken = SimpleNamespace(env_reward=None, tool_call_count=0)
+    assert rollout_reward(right) == pytest.approx(1.08)
+    assert rollout_reward(wrong) == 0.0
+    assert rollout_reward(broken) is None
+    assert correctness_only(right) == 1.0
+
+
+from pirl.reward import REWARDS, efficiency_value
+
+
+def test_efficiency_reward_bounds_and_gating():
+    assert efficiency_value(None, 3, 1000, 100) is None
+    assert efficiency_value(0.0, 1, 100, 10) == 0.0  # wrong: no bonus however efficient
+    best = efficiency_value(1.0, 0, 0, 0)
+    worst = efficiency_value(1.0, 60, 40_000, 9_000)
+    assert best == pytest.approx(1.13) and worst == pytest.approx(1.0)
+    assert all(1.0 <= efficiency_value(1.0, c, x, g) <= 1.13 + 1e-9
+               for c in (0, 5, 40) for x in (0, 15_000, 30_000) for g in (0, 2_000, 5_000))
+
+
+def test_efficiency_prefers_small_context_among_correct():
+    peek = efficiency_value(1.0, 5, 6_000, 800)
+    read_whole = efficiency_value(1.0, 5, 24_000, 800)
+    assert peek > read_whole
+
+
+def test_variants_registry():
+    o = SimpleNamespace(env_reward=1.0, tool_call_count=6, final_context=10_000, generated_tokens=1_000)
+    assert REWARDS["correctness"](o) == 1.0
+    assert REWARDS["calls"](o) == pytest.approx(1.08)
+    assert 1.0 < REWARDS["efficiency"](o) < 1.13
+
+
+def test_tool_ctx_reward():
+    from pirl.reward import tool_ctx_value
+    assert tool_ctx_value(None, 3, 5000, 900) is None
+    assert tool_ctx_value(0.0, 3, 5000, 900) == 0.0
+    tool = 0.1 * 15 / (15 + 5)
+    assert abs(tool_ctx_value(1.0, 5, 15_900, 900) - (1.1 + tool)) < 1e-9   # own 15,000: bonus
+    assert abs(tool_ctx_value(1.0, 5, 15_901, 900) - (1.0 + tool)) < 1e-9   # own 15,001: no bonus
+    assert abs(tool_ctx_value(1.0, 5, 21_000, 6_330) - (1.1 + tool)) < 1e-9  # heavy harness, own 14,670
+    assert tool_ctx_value(1.0, 5, None, None) == 1.0 + tool                 # unknown context: no bonus
+
+
+def test_harness_assignment():
+    import types
+    from pirl.grpo import harness_for
+    a = types.SimpleNamespace(harnesses="pi,mini-swe-agent,codex")
+    assert [harness_for(a, i) for i in range(4)] == ["pi", "mini-swe-agent", "codex", "pi"]
+    assert harness_for(types.SimpleNamespace(), 7) == "pi"
+
+
+def test_lr_schedule():
+    import types
+    from pirl.grpo import lr_at
+    a = types.SimpleNamespace(lr=3e-5, steps=110, lr_schedule="cosine", warmup_steps=10, min_lr=3e-6)
+    assert abs(lr_at(a, 0) - 3e-6) < 1e-12 and abs(lr_at(a, 9) - 3e-5) < 1e-12
+    assert abs(lr_at(a, 10) - 3e-5) < 1e-12 and abs(lr_at(a, 60) - 1.65e-5) < 1e-12 and abs(lr_at(a, 110) - 3e-6) < 1e-12
+    assert lr_at(types.SimpleNamespace(lr=1e-5, steps=5), 3) == 1e-5
