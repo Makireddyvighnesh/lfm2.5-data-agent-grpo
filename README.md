@@ -8,6 +8,7 @@ FP8 sampling and training, a 24k context window instead of 128k, and no prompt h
 
 Full experiment log: [EXPERIMENTS.md](EXPERIMENTS.md). Benchmark and setup flaws: [FINDINGS.md](FINDINGS.md).
 Plan history: [PLAN.md](PLAN.md).
+LoRA weights (not in this repo): [makireddyvighnesh/lfm2.5-2.6b-data-agent-lora](https://huggingface.co/makireddyvighnesh/lfm2.5-2.6b-data-agent-lora) (private; root = p8 u200, `p9_u120/`).
 
 ## Headline results (test250, the blog's test split)
 
