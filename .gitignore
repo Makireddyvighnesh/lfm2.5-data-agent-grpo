@@ -25,3 +25,6 @@ __pycache__/
 
 # Secrets
 .env
+
+# Download archive
+*.tar.gz
