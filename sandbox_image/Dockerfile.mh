@@ -1,0 +1,21 @@
+# Data Agent multi-harness sandbox: pi + Prime Agent + OpenCode image, plus Codex, mini-swe-agent and Claude Code
+# preinstalled so no harness is installed per rollout. Retagged as savatar101/env-data-agent-train:base.
+# Rollback: docker tag pirl/sandbox:pi-prime-opencode savatar101/env-data-agent-train:base
+FROM pirl/sandbox:pi-prime-opencode
+ENV CODEX_VERSION=0.163.0
+# Codex the way Harbor installs it (nvm node 22), plus Harbor's root symlinks.
+RUN bash -c ". ~/.nvm/nvm.sh && nvm use 22 && npm i -g @openai/codex@${CODEX_VERSION} && codex --version" \
+ && bash -c ". ~/.nvm/nvm.sh && for b in node codex; do ln -sf \"\$(command -v \$b)\" /usr/local/bin/\$b; done"
+# mini-swe-agent the way Harbor installs it, plus `mcp`: current litellm imports it without declaring it.
+RUN (command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh) \
+ && export PATH="$HOME/.local/bin:$PATH" \
+ && (grep -q 'export PATH="$HOME/.local/bin:$PATH"' ~/.bashrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc) \
+ && uv python install 3.12 \
+ && uv tool install --python 3.12 mini-swe-agent --with litellm --with orjson --with fastapi --with mcp \
+ && mini-swe-agent --help >/dev/null && uv tool list | grep mini-swe-agent
+# Claude Code (pinned to the version Harbor installed in the 2026-10-21 smoke); on PATH via ~/.local/bin so
+# Harbor's install check passes and no per-rollout npm install runs (that timed out at concurrency 32).
+ENV CLAUDE_CODE_VERSION=2.1.306
+RUN bash -c ". ~/.nvm/nvm.sh && nvm use 22 && npm i -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+ && mkdir -p ~/.local/bin && bash -c ". ~/.nvm/nvm.sh && ln -sf \"\$(command -v claude)\" ~/.local/bin/claude && ln -sf \"\$(command -v claude)\" /usr/local/bin/claude" \
+ && bash -lc 'export PATH="$HOME/.local/bin:$PATH"; claude --version'

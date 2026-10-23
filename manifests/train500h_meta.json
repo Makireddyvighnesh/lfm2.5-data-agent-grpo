@@ -1,0 +1,5 @@
+{
+ "source": "1000 train tasks minus 210 never solved (train500_meta.json); 300 hard + 200 medium; seed 20261014",
+ "hard": 300,
+ "medium": 200
+}

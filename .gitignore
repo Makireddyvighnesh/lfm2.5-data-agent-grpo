@@ -1,0 +1,24 @@
+# Run outputs, checkpoints, benchmark results (never commit: see LLMPerfLab/CLAUDE.md)
+runs/
+checkpoints/
+results/
+# Prepared task data (regenerable with prepare_eval.py / prefetch_data.py)
+prepared/
+prepared_v*/
+# Analysis outputs (keep the scripts and small summaries)
+analysis/*/
+analysis/*.txt
+# Weights and profiler artifacts
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.bin
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+# Python / editor
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
