@@ -31,6 +31,25 @@ pass@1. r4 = 4 attempts per task (1,000 per cell, about ±1.5 pts); r1 = 1 attem
 
 Val118 (our own 118-task holdout from the eval split), Pi, r1: base 39.8 (thinking on), p7 u350 53.4, p8 u200 60.2.
 
+![test250 pass@1 by harness](docs/plots/test250_results.png)
+
+## Training curves
+
+p8 (epoch 1, updates 1-200) and p9 (epoch 2, updates 201-320). Regenerate with `python analysis/plot_readme.py`.
+
+![Training accuracy by harness](docs/plots/train_accuracy.png)
+
+- Codex, the harness the starting checkpoint was weakest on, climbs from about 60% to 75-80% during epoch 1.
+- Epoch 2 batches are harder by construction (only tasks not solved 8/8), so its raw accuracy drops; on the same
+  tasks epoch 2 still beat epoch 1 by 5-11 points per window, but test250 showed no gain.
+
+![RL training signals](docs/plots/train_signals.png)
+
+- Reward follows accuracy (correct answers earn 1 plus up to 0.2 in efficiency bonuses).
+- Peak context falls from about 9k to 7.5k tokens and tool calls from about 9 to 8 during epoch 1, as the
+  efficiency bonuses intend; both rise again on the harder epoch-2 tasks.
+- Gradient norm stays in a narrow 0.06-0.10 band: no instability or collapse in either epoch.
+
 ## Method
 
 - **Algorithm:** GRPO, LoRA r16 / alpha 32 on a frozen FP8 base, 4 tasks x 8 rollouts per update, advantage
@@ -95,7 +114,8 @@ Val118 (our own 118-task holdout from the eval split), Pi, r1: base 39.8 (thinki
 | `grader_v3.py`, `prepare_eval.py`, `prefetch_data.py` | fixed grader and task-data preparation |
 | `manifests/` | task lists: `train798`, `train_e2`, `val118`, ... |
 | `sandbox_image/` | sandbox Dockerfiles (`Dockerfile.mh` = all harnesses preinstalled) |
-| `analysis/` | analysis scripts (`merge_r4.py`, `category_overlap.py`, failure reviews, plots) |
+| `analysis/` | analysis scripts (`merge_r4.py`, `category_overlap.py`, `plot_readme.py`, failure reviews) |
+| `docs/plots/` | README figures (training curves, test250 results) |
 | `smoldataenvs/` | snapshot of our SmolDataEnvs training code: `pirl/` (GRPO trainer, rewards, evaluator), tests |
 | `EXPERIMENTS.md`, `FINDINGS.md`, `PLAN.md` | experiment log, flaws found, plan history |
 
