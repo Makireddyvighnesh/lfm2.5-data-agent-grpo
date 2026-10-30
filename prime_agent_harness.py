@@ -11,6 +11,7 @@ falls back to the official installer when it is missing.
 """
 
 import json
+import os
 import shlex
 from typing import Any
 
@@ -22,7 +23,7 @@ VERSION = "0.10.0"
 PROVIDER = "intercept"  # same provider alias as OpenEnv's pi seam, so model_fmt can be shared
 PATH = 'export PATH="$HOME/.local/bin:$PATH"; '
 MAX_TOKENS = 4096  # per-call output cap, same as pirl.common.MAX_TOKENS
-CONTEXT = 32768  # vLLM --max-model-len
+CONTEXT = int(os.environ.get("PRIME_AGENT_CONTEXT", "32768"))  # = vLLM --max-model-len (set by the Harbor launcher)
 
 
 class InterceptPrimeAgent(BaseInstalledAgent):

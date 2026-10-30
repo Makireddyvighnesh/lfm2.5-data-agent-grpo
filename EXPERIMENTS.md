@@ -194,3 +194,209 @@ p8_mh started 2026-10-21 ~10:00 UTC (run_train_mh.sh 200).
 - r4 final (1000 attempts each, p8 u200 vs p9 u120): pi 61.0 vs 60.9; mini-swe-agent 64.1 vs 63.6 (-0.5 +- 2.4);
   codex 57.2 vs 54.1 (-3.1 +- 2.5, significant). Verdict: epoch 2 did not help and slightly hurt codex -> p8 u200 is the best checkpoint.
   vs blog (128k): mini-swe 64.1 vs 64.8, codex 57.2 vs 53.6.
+
+## Epoch 1 on unseen harnesses (2026-10-24, test250 r1, 24k)
+- Stage 2 (p8 u200): OpenCode 56.0 (Stage 1 44.4, Stage 3 50.8), Claude Code 53.2 (Stage 1 46.4, Stage 3 52.4).
+  Paired vs Stage 1: OpenCode +11.6 +- 6.2, Claude Code +6.8 +- 5.5. Stage 2 is best on all five harnesses.
+- Average over the reference's 4 harnesses: Stage 2 57.6 vs reference multi-harness 54.2 (reference base 42.2).
+
+## p10_mh_r32: multi-harness from scratch (started 2026-10-26, tmux dataagent-p10, run_train_p10.sh)
+- Fresh LoRA r32 / alpha 64 on base (no p7/p8 init). Harnesses pi + mini-swe-agent + codex, train1000 (all tasks, incl. the 202 p6 never solved), p8 recipe
+  (24k, thinking OFF (p8: ON), prefix chain, pi bash-only, turn cap 25, 600 s, tool_ctx, lr 3e-5 cosine warmup 10 min 3e-6, FP8 + TIS 2).
+- Batch: 8 tasks x 8 rollouts = 64 per update (packed 32k-token micro-batches, one optimizer step), 200 updates
+  (~2 passes), cosine spans all 200 (new grpo.py --schedule-steps; backup runs/backups/claude-20261015/grpo.py.bak-20261026).
+- Streaming 1 extra group, concurrency 72 (p8: 2 groups, 48; the trainer needs conc >= (groups + stream) x 8).
+- DAPO dynamic sampling (new grpo.py --dynamic-sampling): finished groups with no correctness contrast (all correct or
+  all wrong) are dropped (filtered_rollouts.jsonl) and replaced by new tasks; cap 32 drops per update.
+  Earlier starts stopped before update 1: train798 (runs/p10_mh_r32.aborted-798), thinking ON (.aborted-think).
+- Eval every 100 updates: val118 + test250, r1, 24k, each of the 3 harnesses (trainer pauses during eval).
+- Progress 2026-10-27 02:40 UTC: u41/200, ~18 min/update (gen 13-16, train 4.3), 0 infra errors, peak mem 13.8 GiB.
+  Kept-group correct (10-update windows): 0.43 -> 0.47 -> 0.51 -> 0.53; codex 0.25 -> 0.51, submit 0.71 -> 0.91.
+  Dropped groups/update 6.8 -> 10.0; all-correct share of drops 0.9 -> 5.3 (model is solving more tasks 8/8).
+- Speed diagnosis (u30-44): update ~18-20 min = generation 15.3 + training 4.4 + sync 0.04. vLLM ran only ~30-39 of 72
+  rollouts: streaming kept at most groups+1 = 9 groups in flight, and finished groups waiting for the update held their
+  slot, so at update time 1 group was still generating (groups_in_flight 1.0). KV use 12-17%, CPU 57% idle, rollout
+  overhead outside the agent ~9 s. Trainer 2,350 tok/s with full gradient checkpointing (compute-bound; no change).
+- Speed changes from u45 (2026-10-27 03:30 UTC, grpo.py backup runs/backups/claude-20261015/grpo.py.bak-20261027-dapo):
+  `--async-groups 14` (keep 14 UNFINISHED groups generating; finished groups wait for the next update), conc 112,
+  vLLM max-num-seqs 96 + 6 LoRA slots (restart_vllm.sh MAX_LORAS), `--dynamic-skip` (revisit skipped once after an
+  all-correct visit or two all-wrong visits; skipped_tasks.jsonl; takes effect from the 2nd pass, ~u62), agent
+  wall-clock cap 900 s (in-flight rollouts now pause during each ~4.5-min training phase; active cap stays ~600 s).
+  New test tests/test_grpo_dynamic.py (60 tests pass).
+- Restarts after the speed change: Harbor hit its 128-session cap (needs >= 2x 112 slots) -> --max-envs 256; trainer
+  waited up to agent_timeout for in-flight rollouts on exit -> now aborts them (vLLM abort-sleep, os._exit, positions
+  saved); pipeline waits for both Harbor ports before restarting; resume guard override --allow-change agent_timeout
+  (config_changes.jsonl).
+- Steady-state timing (u47-49): 8.1 / 10.8 / 9.7 min (gen 3.7-7.5, train 3.2-4.4), lag 1.0, KL 0.0084 (= before), 0 infra.
+  Sampler over one cycle: training = 42% of wall time; generation 980 tok/s mean (1,180 at >=40 running = 20 tok/s/seq,
+  ~30% under the 64-seq benchmark), 96% prefix-cache hits. vLLM was padding the r32 adapter to LoRA rank 64 ->
+  restarted at u49 with --max-lora-rank 32 (05:26 UTC).
+- Skip rule changed at u53 (user decision, 06:27 UTC; backup grpo.py.bak-20261027-skip1): a task is removed for the
+  rest of the run once a visit was all correct; a revisit after an all-wrong visit is skipped with p=0.5
+  (--skip-wrong-frac, coin seeded by task + visit count). Pass-1 groups so far (839): mixed 50%, all-wrong 29%,
+  all-correct 21% (codex: 54 / 34 / 12) -> ~35% of pass-2 visits skipped.
+- Epoch-1 stop (user decision, 07:46 UTC at u59): grpo.py --stop-at-pos 1000 (submit no position >= 1000, train on the
+  remaining epoch-1 groups, stop; test in tests/test_grpo_dynamic.py, 61 pass). run_train_p10.sh EPOCH_STOP=1000 keeps
+  the adapter in runs/p10_mh_r32/epoch1 and runs test250 r1 (24k, thinking OFF, 600 s) on pi / mini-swe-agent / codex
+  as p10e1. Bug fixed on the way: run_test250_p7.sh hardcoded PIRL_THINKING=1 (now ${PIRL_THINKING:-1}).
+
+### p10 epoch 1 (u63, from scratch, thinking OFF) on test250 r1, 24k, 600 s (2026-10-27 08:46-11:00 UTC)
+| Harness | p10e1 | p8 u200 (thinking ON, from p7) | p7 u350 | Blog multi-harness |
+|---|---|---|---|---|
+| pi | 55.2 | 58.4 | 61.6 (16k) | - |
+| mini-swe-agent | 63.2 | 62.8 | 64.0 | 64.8 |
+| codex | 50.0 | 53.6 | 39.6 | 53.6 |
+| opencode (not trained) | 44.0 | 56.0 | 44.4 | 49.6 |
+| claude-code (not trained) | 47.6 | 53.2 | 46.4 | 48.8 |
+- Valid: 0 infra errors; 0 rollouts without a model call except claude-code 8/250; claude-code out of context 43/250
+  (its ~10.8k-token prompt in the 24k window).
+- Blog 4-harness average (mini, codex, opencode, claude-code): p10e1 51.2, p8 u200 57.6, blog multi-harness 54.2, blog base 42.2.
+- r1 SE ~3 pts per harness. p10e1 = 63 updates x 64 rollouts from base; p8 = 200 x 32 on top of the p7 lineage + thinking ON.
+- No base thinking-OFF test250 number yet, so the epoch-1 gain over its own starting point is not measured.
+- Epoch 2 started 2026-10-27 15:44 UTC (user decision): EPOCH_STOP=2000 ./run_train_p10.sh resumes from u63 (pos 1000),
+  stops when all positions < 2000 are done, keeps runs/p10_mh_r32/epoch2, test250 r1 on all 5 harnesses as p10e2.
+  Skips active from u64 (solved tasks removed, 50% of all-wrong revisits skipped). LR keeps the 200-update cosine.
+- Harbor session leak (u64-67, 28 infra errors "at capacity: 256/256"): sessions of rollouts abandoned at trainer stops
+  (u49/u53/u59, ~350 rollouts) are never freed by Harbor (up since 04:38). Fix 16:47 UTC at u67: the pipeline now
+  restarts Harbor before every training start (FRESH_HARBOR=1 in run_train_p10.sh).
+
+### p10 epoch 2 (u109) on test250 r1, 24k, thinking OFF (2026-10-28, evals done 02:50 UTC)
+- Epoch 2 = u64-109 (46 updates), u70+ mean 10.9 min/update, 0 infra errors after the Harbor restart, KL 0.0087.
+| Harness | p10 e1 (u63) | p10 e2 (u109) | gained / lost (paired) | p8 u200 | Blog |
+|---|---|---|---|---|---|
+| pi | 55.2 | 56.4 | 20 / 17 (z +0.5) | 58.4 | - |
+| mini-swe-agent | 63.2 | 62.0 | 20 / 23 (z -0.5) | 62.8 | 64.8 |
+| codex | 50.0 | **57.6** | 37 / 18 (**z +2.6**) | 53.6 | 53.6 |
+| opencode (not trained) | 44.0 | 37.6 | 21 / 37 (**z -2.1**) | 56.0 | 49.6 |
+| claude-code (not trained) | 47.6 | 47.2 | 26 / 27 (z -0.1) | 53.2 | 48.8 |
+- Valid: 0 errors; claude-code 1 rollout without a model call, out of context 18.8%.
+- Blog 4-harness average: e1 51.2 -> e2 51.1 (p8 57.6, blog multi-harness 54.2).
+- Reading: epoch 2 helped the hardest trained harness (codex, now above p8 and the blog) and hurt OpenCode, which is
+  never trained on; pi / mini / claude-code unchanged within noise.
+
+### Why p10 is low on OpenCode / Claude Code (audit 2026-10-28, analysis/tool_audit.py + ATIF trajectories)
+No pipeline bug found: same grader, Harbor config and 24k window as the p8 evals, eval ran with PIRL_THINKING=0
+(matches training), 0 infra errors. The losses are model behaviour in harnesses it never trained on:
+| Run | pass | context out | wrong tool name | cmd killed (timeout in s, harness wants ms) | clean |
+|---|---|---|---|---|---|
+| opencode p8 u200 | 56.0 | 4 (0.00) | 9 (0.33) | 95 (0.51) | 142 (0.63) |
+| opencode p10 e2 | 37.6 | 1 (0.00) | 62 (0.29) | 138 (0.41) | 49 (0.41) |
+| claude-code p8 u200 | 53.2 | 46 (0.04) | 19 (0.37) | 0 | 185 (0.67) |
+| claude-code p10 e2 | 47.2 | 47 (0.02) | 64 (0.38) | 0 | 139 (0.67) |
+(rollouts, pass rate in brackets; categories assigned in that order)
+- Wrong tool names carried over from training harnesses: OpenCode `finish` (92 calls / 62 rollouts); Claude Code
+  lowercase `bash` 143, ToolSearch 111, Agent 31 (85 rollouts; p8: 68 calls / 28 rollouts).
+- OpenCode bash `timeout` passed in seconds (pi semantics) -> killed after N ms: 1,669 of ~2,000 timeout args in p10 e2,
+  kills in 193/250 rollouts (p8: 101). Claude Code is not affected.
+- Claude Code context exhaustion ~18% for every model (p7/p8/p9/p10): its ~10.8k-token prompt in the 24k eval window.
+- Thinking OFF costs accuracy: p10 rollouts where the model still reasons in text (emits </think>) pass far more often
+  (OpenCode 0.42 vs 0.30, Claude Code 0.52 vs 0.32, Codex 0.60 vs 0.43, Pi 0.58 vs 0.41). p8 reasoned on 99% of turns.
+- Claude Code gap is fully the wrong-tool habit (clean rollouts 0.67 for both). OpenCode also has a general gap
+  (clean 0.41 vs 0.63), consistent with thinking OFF.
+- User decision 2026-10-28: thinking stays OFF (the blog used thinking OFF), so p10 is compared with the blog, not p7-p9.
+- User decision 2026-10-28: OpenCode and Claude Code stay held out (test-only) to measure adaptation to unseen harnesses.
+- Why epoch 2 is lower on OpenCode (44.0 -> 37.6; other harnesses flat or up):
+  - Harness errors are NOT more frequent in e2 (timeout args 1,866 -> 1,671; rollouts with ms-kills 138 -> 138;
+    `finish` calls 87 -> 94). `finish` is harmless: the answer was written before it in 61/62 rollouts.
+  - The drop is give-ups: "Not Applicable" answers in OpenCode 25 -> 38 (never correct: 0/250 test golds, 0/1000 train
+    golds are "Not Applicable"); 87-88% of those rollouts had commands killed by the ms timeout. Other harnesses:
+    NA counts unchanged (pi 11->8, mini 6->7, codex 23->22, claude-code 18->22).
+  - Lost-task answers (37): wrong label 22, no answer 9, wrong number 6.
+  - Reading: after epoch 2 the model more often concludes "no applicable answer" when its OpenCode commands die,
+    a failure mode the training harnesses never produce. Not a pipeline bug.
+- Why Claude Code did not improve (47.6 -> 47.2), 2026-10-28:
+  - Clean rollouts improved (pass 0.62 -> 0.67) but rollouts with harness-habit errors grew (46 -> 63, pass ~0.38):
+    lowercase `bash` calls 78 -> 143 (Claude Code: "No such tool… call Bash instead"); ToolSearch 72 -> 111 and Agent
+    are valid Claude Code tools but unhelpful detours. Net zero.
+  - Context exhaustion ~19% at every epoch (p8 too): ~10.8k-token fixed prompt leaves ~13k of the 24k window. The tool
+    cap DOES apply (checked: Read results arrive capped at ~4,047 chars; the 92k-char sizes were Claude Code's own
+    uncapped log). The window fills by accumulation: whole-file Reads of two files per call (one rollout hit Read's
+    256 KB limit and retried with allow_large=true), long assistant messages (up to 10k chars), ~15 turns.
+- Claude Code at a 32k window (2026-10-28, run_cc32k.sh; only vLLM max_model_len changed):
+  p10e2 47.2 (24k) -> 46.8 (32k), out of context 18.8% -> 1.6%; p10e1 47.6 -> 46.0, 17.2% -> 2.4%.
+  Of the 47 e2 tasks that ran out of context at 24k: 7 correct at 32k, 17 no answer (median 16 turns, ~23k peak),
+  3 Not Applicable, 3 still out. Paired 24k->32k on e2: 26 gained / 27 lost (r1 noise). The window is not the
+  bottleneck: the overflowing tasks are long, non-converging rollouts. ~47% is p10's real Claude Code level.
+- OpenCode epoch-2 repeat (24k, independent second run, label mh24k_opencode_p10e2rep): 41.2 (first run 37.6).
+  Same adapter, 63/250 tasks flip between the two runs (r1 noise is large). Mean of two e2 runs 39.4 vs e1 44.0
+  (single run). e1 vs repeat paired: 31 gained / 38 lost (z -0.8). "Not Applicable" reproduces: e1 25, e2 38 and 41.
+  Reading: the e2 OpenCode drop is ~4-5 pts, about half of the first estimate; the give-up increase is real.
+- Epoch 3 started 2026-10-28 07:07 UTC (user decision): EPOCH_STOP=3000 from u109 (pos 2000); 336 tasks already
+  solved 8/8 are removed, so ~660 remain before the 50% all-wrong skip. Test250 on all 5 harnesses at the end (p10e3).
+  Question it answers: harness overfitting (trained harnesses hold, held-out OpenCode / Claude Code fall) vs noise.
+- Epoch 3 done at u150 (2026-10-28 14:55 UTC; u110-150, ~11.9 min/update, 0 infra). Eval order changed to held-out
+  first (run_p10e3_eval.sh took over the pipeline end). OpenCode p10e3 38.0 (e1 44.0, e2 37.6 / 41.2):
+  "Not Applicable" 25 -> 38/41 -> 43; ms-kill rollouts ~185-193 and timeout arg on ~50% of calls at every epoch.
+- Claude Code p10e3 42.0 (e1 47.6, e2 47.2): lowercase `bash` calls 78 -> 143 -> 231, rollouts with it 20 -> 37 -> 51
+  and their pass 0.40 -> 0.43 -> 0.27; clean rollouts 0.59 -> 0.61 -> 0.56; "Not Applicable" 18 -> 22 -> 28;
+  out of context 43 -> 47 -> 37. Same pattern as OpenCode: training-harness habits grow every epoch.
+- 2026-10-28 ~16:05 UTC: epoch-3 eval stopped by the user after OpenCode (38.0) and Claude Code (42.0); pi was cut
+  mid-run (partial output removed), mini-swe-agent and codex not run. vLLM stopped; GPU idle. Adapters kept:
+  runs/p10_mh_r32/epoch1, epoch2, epoch3 (u63 / u109 / u150).
+- Why the model picks wrong tool names despite a correct tool list: correct training rollouts contain ~2,340 `bash`
+  calls (pi + mini), and also calls to a nonexistent `finish` (codex 112, pi 57 in an 800-rollout sample) that still
+  earned full reward, so RL reinforces them. In Claude Code the model's probability for the wrong `bash` token rises
+  0.85 (e1) -> 0.85 (e2) -> 0.96 (e3) while its calls to it go 77 -> 131 -> 218. The tool list never mattered in
+  training, so RL sharpened the habit until the prompt cannot override it.
+
+## p11_mh4_r32: 4 training harnesses + tool-error penalty (started 2026-10-28, run_train_p11.sh, tmux dataagent-p11)
+- User choice (option 3): add Prime Agent as a 4th TRAINING harness (offers only `ipython`) and penalise invented
+  tools. OpenCode and Claude Code remain held out. Everything else = p10 (fresh LoRA r32, thinking OFF, 1000 tasks,
+  8 x 8, DAPO dynamic sampling + async + skip rules, 24k, lr 3e-5 cosine/200, FP8 + TIS).
+- Reward tool_ctx_err (pirl/reward.py): tool_ctx - 0.1 x unknown-tool calls (cap 0.3), on every scored rollout.
+  Unknown = called name not in that request's captured `request_tools` (pirl/grpo.py unknown_tool_calls).
+  Checked on p10 evals: Codex 455 unknown calls in 172/250 rollouts (read_file 212, finish 206), Pi 67 (read, finish),
+  mini 0, OpenCode 41 (finish), Claude Code e3 368 (bash 222).
+- Dynamic sampling keeps groups with correctness OR unknown-tool contrast (--dynamic-keep-tool-contrast).
+- Prime Agent smoke (base, 8 train tasks, 24k): mechanics OK (atif match, 1 root, first prompt ~8.4k, peak <=11k,
+  0 out of context); 1/8 correct; base calls `bash` 3-25 times per rollout although only `ipython` is offered.
+- prime_agent_harness.py: context window from PRIME_AGENT_CONTEXT (was hardcoded 32768). 64 tests pass.
+- BUG (found 2026-10-29 at u46): unknown_tool_calls() was given the training trace, whose turns have no
+  request_tools, so every rollout read 0 unknown calls: the tool_ctx_err penalty and --dynamic-keep-tool-contrast
+  were inert for u1-46. (The pre-launch check used capture["result"], which has the field; the unit test used a
+  synthetic payload.) Fix: read the result payload; return None (not 0) when no turn carries a tool list; test added.
+  The running trainer still has the old code. So far p11 = "Prime Agent as 4th harness, no penalty".
+- Real unknown-tool calls in p11 training (recomputed from captures): Prime 11.1/rollout (u1-10) -> 2.2 -> 1.6 -> 1.5
+  -> 1.4 (u41-50) but still >=1 in 98% of Prime rollouts; Codex flat ~0.33/rollout (25% of rollouts); Pi ~0; mini 0.
+  Prime alone teaches most of the `bash`->`ipython` switch; Codex's invented read_file/finish get no pressure.
+- Audit 2026-10-29 (p11 u48, epoch 1 running unchanged):
+  - Not bugs: packed rows are isolated (pirl/lfm2_packing.py, Oct 3: mamba-ssm conv kernel + seq_idx hook + startup
+    check; FA3 hub kernel handles attention varlen); KL ~0.0097 = one-update policy lag of async generation (lag 0.86),
+    TIS covers it; no recompiles (2,390 tok/s steady); multi-root rollouts <=4%.
+  - Time: update 14.3 min = generation 9.5 + training 4.8. vLLM 73-80 running, KV 37%, GPU 90-100%, 95% prefix hits;
+    effective decode ~908 tok/s. Generated tokens: kept groups 43%, dropped all-wrong 48%, dropped all-correct 9%.
+    Rollouts >17 calls: 9% of rollouts, 12% of tokens, 7% correct. Calls hitting 4,096 tokens: 9% of rollouts, 11% of
+    tokens, 0% correct, but rollouts whose longest call is 2,048-3,071 tokens are 22% correct -> per-call cap kept.
+    800 s+ rollouts (19%, 8% correct) mostly spanned 1-2 training phases (vLLM asleep, wall clock running).
+  - Changes from epoch 2 (run_train_p11.sh, auto-started by run_p11_chain.sh after the epoch-1 evals):
+    unknown-tool counter fix (penalty + tool-contrast keep become active), training turn cap 25 -> 17 (blog value;
+    evals stay 25), probe sampling --probe-hard 4 for tasks last seen all wrong (pirl/grpo.py resolve_probes; test in
+    tests/test_grpo_dynamic.py). 65 tests pass. Backups: runs/backups/claude-20261015/grpo.py.bak-20261029-probe.
+- p11 stopped at u50 (2026-10-29 ~04:20 UTC, user decision) before the end of epoch 1; no eval. Data kept.
+
+## p12_mh4_r32: fresh start with all fixes (2026-10-29, run_train_p12.sh, tmux dataagent-p12)
+- = p11 design (4 training harnesses incl. Prime Agent; OpenCode/Claude Code held out; reward tool_ctx_err) with the
+  fixed unknown-tool counter, tool-contrast keep, training turn cap 17 and probe sampling active from update 1.
+- Epoch-1 test250 r1 (p12e1): OpenCode 37.2, Claude Code 47.2, Pi 58.8, mini-swe-agent 62.9, Codex 52.4 (Prime Agent
+  pending). Failure buckets (analysis/failure_buckets.py): OpenCode 186/250 rollouts hit the seconds-as-ms bash
+  timeout kill (~11 pts); Claude Code 31 context-out (~7 pts), invented tools now ~0.6 pts (p10 e2: 6.7).
+  Claude Code context-out makeup: fixed prompt ~10.8k, model's own text ~7k, tool outputs (after 4k cap) ~3.7k.
+- Changes from epoch 2 (2026-10-29, run_train_p12.sh when EPOCH_STOP >= 2000; auto-started in tmux dataagent-p12:e2
+  after the epoch-1 evals): Pi tools bash -> bash,read (file reading under RL pressure; p7 bash-only had cut full
+  reads 90% -> 0% by removal, not learning); reward tool_ctx_err -> tool_ctx_read (--allow-change reward):
+  - capped-output penalty 0.05 per tool output over the 4000-char proxy cap, max 0.2, on every scored rollout
+    (pirl/grpo.py capped_tool_outputs, counted from result request_messages, recorded pre-cap);
+  - own-context bonus graded 0.1 at <= 4k own tokens -> 0 at 12k (was flat 0.1 under 15k, paid to ~all e1 rollouts:
+    own context mean 3.5-5k);
+  - groups differing only in capped outputs are kept by --dynamic-keep-tool-contrast.
+  - e1 training rate of capped outputs per rollout: Pi 0.29, Prime 0.21, mini 0.14, Codex 0.07.
+  - Caveat: e2 test250 Pi runs with bash,read, e1 with bash only (not directly comparable on Pi).
+  67 tests pass (2 new in tests/test_reward.py).
+- Epoch 2 done at u127 (2026-10-30 ~02:20 UTC). Epoch-2 test250 r1 (p12e2) vs p12e1: OpenCode 45.6 (37.2),
+  Claude Code 51.6 (47.2), Pi 55.2 (58.8; e2 runs Pi with bash,read, not comparable), mini-swe-agent 63.6 (62.9),
+  Codex 54.4 (52.4), Prime Agent 54.2 (47.2; 249 graded).
+  - OpenCode: timeout-kill rollouts 186 -> 133 (pass 0.32 vs 0.61 without); clean-rollout pass 0.50 -> 0.65.
+  - Claude Code: context-out unchanged (31 -> 30); clean-rollout pass 0.58 -> 0.66; invalid-tool cost 0.6 -> 2.8 pts.
+  - Full-CSV Read calls on held-out harnesses did NOT fall (Claude Code 428 -> 429, OpenCode 285 -> 269; with a
+    limit 135 -> 96, 63 -> 20). Training: Pi capped outputs/rollout 0.87 -> 0.59 over e2; own context flat ~5k.
+    So the held-out gains are not explained by the read/context terms.
