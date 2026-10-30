@@ -13,10 +13,18 @@
 # Epoch 2+ (2026-10-29, after the e1 held-out diagnosis): Pi gets `read` back (bash,read) so file reading is under RL
 # pressure, and reward tool_ctx_read = tool_ctx_err + capped-output penalty (0.05 per tool output the proxy cut at
 # 4000 chars, max 0.2) + own-context bonus graded 4k->12k instead of flat at 15k. Epoch 1 is unchanged.
+# Epoch 3+ (2026-10-30, after the e2 review): reward tool_ctx_read2 (capped-output penalty on correct answers only; on
+# wrong answers it ranked reading nothing above inspecting the data); all-correct groups whose rewards spread by
+# >= 0.03 are kept; 25% of revisits to tasks solved 8/8 are run instead of skipped; cosine span and update cap
+# 200 -> 300 (at u127 the lr was 1.2e-5 and fell to the 3e-6 floor by u200; epoch 2 needed 56 updates).
 set -uo pipefail
-if [ "${EPOCH_STOP:-0}" -ge 2000 ]; then PI_TOOLS=bash,read; REWARD=tool_ctx_read; else PI_TOOLS=bash; REWARD=tool_ctx_err; fi
+total=200; EXTRA=()
+if [ "${EPOCH_STOP:-0}" -ge 3000 ]; then
+  PI_TOOLS=bash,read; REWARD=tool_ctx_read2; total=300; EXTRA=(--keep-reward-spread 0.03 --solved-revisit-frac 0.25)
+elif [ "${EPOCH_STOP:-0}" -ge 2000 ]; then PI_TOOLS=bash,read; REWARD=tool_ctx_read
+else PI_TOOLS=bash; REWARD=tool_ctx_err; fi
 DA="$(cd "$(dirname "$0")" && pwd)"; SMOL="$(cd "$DA/../SmolDataEnvs" && pwd)"
-run=p12_mh4_r32; total=200; every=100; kv=fp8; mode=chain1_seqs96_kvfp8_NOTHINK_len24k_lr32
+run=p12_mh4_r32; every=100; kv=fp8; mode=chain1_seqs96_kvfp8_NOTHINK_len24k_lr32
 HS=(pi mini-swe-agent codex prime-agent)
 mkdir -p "$DA/runs/$run"
 exec >> "$DA/runs/${run}_pipeline.log" 2>&1
@@ -61,13 +69,13 @@ train_to() {  # resumes from runs/$run/state_latest; fresh LoRA on the first sta
     --step-limit 17 --lora-r 32 --lora-alpha 64 --reward $REWARD --allow-change reward --std-floor 0.1 \
     --lr 3e-5 --lr-schedule cosine --warmup-steps 10 --min-lr 3e-6 --schedule-steps "$total" --stream-groups 1 \
     --fp8-base --fp8-mode vllm --is-correction tis --tis-cap 2 --token-budget 32768 \
-    --save-steps 50 --max-infra-fail 0.1 --data-root "$DA/prepared_v32" >> "$DA/runs/$run.log" 2>&1
+    --save-steps 50 --max-infra-fail 0.1 --data-root "$DA/prepared_v32" "${EXTRA[@]}" >> "$DA/runs/$run.log" 2>&1
 }
 
 summ() { "$SMOL/.venv/bin/python" -c 'import json,sys; s=json.load(open(sys.argv[1])); print(sys.argv[2], "graded", s["graded"], "pass@1", round(s["pass_at_1"],3), "ctx_out", round(s.get("context_exhausted_rate") or 0,3), "tools", round(s.get("mean_tool_calls") or 0,1))' "$1" "$2"; }
 
 eval_ckpt() {  # val118 + test250, r1, each training harness
-  local u=$1 name="p10u$1" adapter="$DA/runs/$run/checkpoint-$1/adapter"
+  local u=$1 name="p12u$1" adapter="$DA/runs/$run/checkpoint-$1/adapter"
   ensure_services || return 1
   "$SMOL/.venv/bin/python" -c 'import httpx,sys; print(httpx.post("http://127.0.0.1:8000/v1/load_lora_adapter",json={"lora_name":sys.argv[1],"lora_path":sys.argv[2]},timeout=120).text[:120])' "$name" "$adapter"
   for h in "${HS[@]}"; do

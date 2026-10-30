@@ -400,3 +400,18 @@ No pipeline bug found: same grader, Harbor config and 24k window as the p8 evals
   - Full-CSV Read calls on held-out harnesses did NOT fall (Claude Code 428 -> 429, OpenCode 285 -> 269; with a
     limit 135 -> 96, 63 -> 20). Training: Pi capped outputs/rollout 0.87 -> 0.59 over e2; own context flat ~5k.
     So the held-out gains are not explained by the read/context terms.
+- Changes for epoch 3 (2026-10-30, after a code review of the p12 commits; run_train_p12.sh when EPOCH_STOP >= 3000;
+  not started):
+  - reward tool_ctx_read2: capped-output penalty on correct answers only (on wrong answers it ranked reading nothing
+    above inspecting the data). Unknown-tool penalty unchanged (every scored rollout).
+  - --keep-reward-spread 0.03: keep all-correct groups whose rewards spread by >= 0.03 (e2: 18 of 80 dropped
+    all-correct groups; 0.05 -> 8, 0.02 -> 29).
+  - --solved-revisit-frac 0.25: run 25% of revisits to tasks solved 8/8 (e2 skipped 185 as solved). Low expected
+    read signal: only 4 of the 80 e2 all-correct groups had any capped output, so full-file reading is not
+    concentrated on solved tasks.
+  - --steps / --schedule-steps 200 -> 300: at u127 the lr was 1.17e-5 and would reach the 3e-6 floor by u200, and
+    epoch 2 needed 56 updates (u127 + 56 = 183, close to the 200 cap). With a 300 span the lr at u127 is 2.05e-5.
+  - eval_ckpt label p10u -> p12u (checkpoint-every-100 path only; EPOCH_STOP runs were not affected).
+  - grpo.py: skip decision moved into skip_reason() (same behaviour at --solved-revisit-frac 0). 70 tests pass.
+  - Review findings checked and rejected: "mini-swe-agent observations are role user, never capped" (they are role
+    tool; 152/752 e2 mini rollouts had capped outputs); "Not Applicable answers rose on OpenCode" (79 -> 47).

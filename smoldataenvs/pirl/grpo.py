@@ -145,7 +145,7 @@ def arguments():
     p.add_argument("--hard-generations", type=int, default=8,
                    help="(regret) rollouts for prompts that scored 0 last visit; others use --num-generations")
     p.add_argument("--new-frac", type=float, default=0.5, help="(regret) share of each batch drawn from unseen prompts")
-    p.add_argument("--reward", choices=["correctness", "calls", "efficiency", "context", "tool", "tool_context", "tool_fast", "tool_ctx", "tool_ctx_err", "tool_ctx_read"], default="calls",
+    p.add_argument("--reward", choices=["correctness", "calls", "efficiency", "context", "tool", "tool_context", "tool_fast", "tool_ctx", "tool_ctx_err", "tool_ctx_read", "tool_ctx_read2"], default="calls",
                    help="A: correctness, B: calls (blog recipe), C: efficiency (calls+context+generation), "
                         "context: correctness + <=0.1 bonus for low peak context")
     p.add_argument("--harnesses", default="pi",
@@ -217,6 +217,12 @@ def arguments():
                         "calls with --dynamic-keep-tool-contrast), otherwise dropped at probe cost (0 = off)")
     p.add_argument("--skip-wrong-frac", type=float, default=0.5,
                    help="dynamic skip: probability of skipping a revisit after an all-wrong visit")
+    p.add_argument("--keep-reward-spread", type=float, default=0.0,
+                   help="dynamic sampling: also keep groups whose rewards spread by at least this much (e.g. an "
+                        "all-correct group ranked by its context / capped-output terms); 0 = off")
+    p.add_argument("--solved-revisit-frac", type=float, default=0.0,
+                   help="dynamic skip: probability of revisiting a task already solved 8/8 instead of skipping it "
+                        "(deterministic per task and visit); 0 = solved tasks are never revisited")
     p.add_argument("--tool-output-cap", type=int, default=int(os.environ.get("HARBOR_TOOL_OUTPUT_CAP") or 4000),
                    help="chars above which the capture proxy caps a tool output (Harbor's HARBOR_TOOL_OUTPUT_CAP); "
                         "used to count capped outputs per rollout (reward tool_ctx_read); 0 = off")
@@ -476,9 +482,29 @@ def unknown_tool_contrast(group, cap=3):
     return len(vals) > 1
 
 
-def keep_group(group, tool_contrast=False):
-    """Dynamic sampling: keep a group with correctness contrast, or (optionally) unknown-tool contrast."""
-    return correctness_contrast(group) or (tool_contrast and unknown_tool_contrast(group))
+def reward_contrast(group, min_spread):
+    """True when the group's scored rewards spread by at least min_spread (0 = off): an all-correct group whose
+    efficiency / context terms still rank its rollouts."""
+    vals = [float(r["reward"]) for r in group if r.get("reward") is not None and r["sequences"]]
+    return bool(min_spread) and len(vals) > 1 and max(vals) - min(vals) >= min_spread
+
+
+def keep_group(group, tool_contrast=False, min_reward_spread=0.0):
+    """Dynamic sampling: keep a group with correctness contrast, or (optionally) unknown-tool contrast, or
+    (optionally) a reward spread of at least min_reward_spread."""
+    return (correctness_contrast(group) or (tool_contrast and unknown_tool_contrast(group))
+            or reward_contrast(group, min_reward_spread))
+
+
+def skip_reason(visits, coin, args):
+    """Dynamic skip for a revisit with earlier outcomes `visits` (c / w / m, no skips) and this visit's coin:
+    "solved" if it was solved 8/8 once (unless coin < --solved-revisit-frac), "wrong" if its last visit was all
+    wrong and coin < --skip-wrong-frac, else None (run it)."""
+    if "c" in visits and coin >= getattr(args, "solved_revisit_frac", 0.0):
+        return "solved"
+    if visits[-1] == "w" and coin < getattr(args, "skip_wrong_frac", 0.5):
+        return "wrong"
+    return None
 
 
 def correctness_contrast(group):
@@ -943,13 +969,12 @@ def main():
                 visits = [o for o in h if o != "s"]
                 if not skip_on or not visits:
                     break
-                solved = "c" in visits  # solved 8/8 once: removed for the rest of the run
                 coin = random.Random(f"{args.seed}-{idx}-{len(h)}").random()  # resume-safe coin per revisit
-                if not (solved or (visits[-1] == "w" and coin < getattr(args, "skip_wrong_frac", 0.5))):
+                reason = skip_reason(visits, coin, args)
+                if not reason:
                     break
                 append_jsonl(out / "skipped_tasks.jsonl", {"pos": next_pos, "idx": idx, "step": step + 1,
-                                                           "last": "".join(h[-2:]),
-                                                           "reason": "solved" if solved else "wrong"})
+                                                           "last": "".join(h[-2:]), "reason": reason})
                 task_hist[idx].append("s")
                 skipped_now.append(next_pos)
                 next_pos += 1
@@ -982,7 +1007,8 @@ def main():
                     for g in [g for g in inflight if all(f.done() for f in g["futures"]) and not g.get("probe")]:
                         gr = [f.result() for f in g["futures"]]
                         # mostly-infra groups stay, so the outage check below still sees them
-                        if (not keep_group(gr, getattr(args, "dynamic_keep_tool_contrast", False))
+                        if (not keep_group(gr, getattr(args, "dynamic_keep_tool_contrast", False),
+                                           getattr(args, "keep_reward_spread", 0.0))
                                 and sum(map(infra_failed, gr)) * 2 < len(gr)):
                             inflight.remove(g)
                             dropped.append((g, gr))

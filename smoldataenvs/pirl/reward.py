@@ -280,7 +280,29 @@ def tool_ctx_read_reward(outcome):
                                getattr(outcome, "capped_tool_outputs", None))
 
 
+# Variant `tool_ctx_read2` (2026-10-30, p12 epoch 3): `tool_ctx_read` with the capped-output penalty on correct answers
+# only. On wrong answers it ranked a quick answer that read nothing above a wrong answer that inspected the data, a
+# push toward giving up. The unknown-tool penalty still applies to every scored rollout (tool_ctx_err behaviour).
+def tool_ctx_read2_value(env_reward, n_tool_calls, peak_context, first_prompt, n_unknown_tools, n_capped_outputs):
+    """Correct: 1 + tool bonus + graded own-context bonus - capped-output penalty (<= 0.2); wrong or missing: 0.
+    Then minus the unknown-tool penalty (<= 0.3). A correct answer (>= 0.5) still beats any wrong one (<= 0)."""
+    if env_reward is None:
+        return None
+    if float(env_reward) < 1.0:
+        base = 0.0
+    else:
+        base = (1.0 + tool_efficiency_bonus(n_tool_calls) + own_context_graded_bonus(peak_context, first_prompt)
+                - capped_output_penalty(n_capped_outputs))
+    return base - unknown_tool_penalty(n_unknown_tools)
+
+
+def tool_ctx_read2_reward(outcome):
+    return tool_ctx_read2_value(outcome.env_reward, outcome.tool_call_count, getattr(outcome, "peak_context", None),
+                                getattr(outcome, "first_prompt", None), getattr(outcome, "unknown_tool_calls", None),
+                                getattr(outcome, "capped_tool_outputs", None))
+
+
 REWARDS = {"correctness": correctness_only, "calls": rollout_reward, "efficiency": efficiency_reward,
            "context": context_reward, "tool": tool_reward, "tool_context": tool_context_reward,
            "tool_fast": tool_fast_reward, "tool_ctx": tool_ctx_reward, "tool_ctx_err": tool_ctx_err_reward,
-           "tool_ctx_read": tool_ctx_read_reward}
+           "tool_ctx_read": tool_ctx_read_reward, "tool_ctx_read2": tool_ctx_read2_reward}

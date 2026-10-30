@@ -103,7 +103,8 @@ p8 (epoch 1, updates 1-200) and p9 (epoch 2, updates 201-320).
 24k context, FP8 + TIS cap 2, DAPO dynamic sampling. Training harnesses: Pi, mini-swe-agent, Codex, Prime Agent;
 OpenCode and Claude Code are held out (test only). Reward `tool_ctx_err` in epoch 1 (penalty for calling tools the
 harness did not offer); from epoch 2, `tool_ctx_read` (adds a penalty for tool outputs cut by the 4,000-char proxy
-cap and a graded own-context bonus) with Pi's `read` tool enabled. Details in EXPERIMENTS.md.
+cap and a graded own-context bonus) with Pi's `read` tool enabled. Epoch 3 (prepared, not yet run): `tool_ctx_read2` (capped-output penalty on correct
+answers only), 25% revisit of solved tasks, LR schedule over 300 updates. Details in EXPERIMENTS.md.
 
 test250 r1 pass@1:
 
@@ -120,7 +121,7 @@ test250 r1 pass@1:
 
 | Path | Contents |
 |---|---|
-| `run_train_p12.sh` | p12 pipeline: Harbor + vLLM startup, training per epoch (`EPOCH_STOP=1000/2000`), test250 on 6 harnesses |
+| `run_train_p12.sh` | p12 pipeline: Harbor + vLLM startup, training per epoch (`EPOCH_STOP=1000/2000/3000`), test250 on 6 harnesses |
 | `train_grpo.sh` | trainer launcher (wraps `smoldataenvs/pirl/grpo.py`) |
 | `run_test250_p7.sh` | test250 evaluation of one adapter on one harness |
 | `restart_vllm.sh`, `runtime_vllm_worker.py` | FP8 vLLM server with runtime patches |
@@ -152,5 +153,7 @@ docker tag pirl/sandbox:pi-mh2 savatar101/env-data-agent-train:base
 # p12 epoch 1 (starts Harbor and vLLM itself; run in tmux), then epoch 2; each ends with test250 on 6 harnesses
 EPOCH_STOP=1000 ./run_train_p12.sh
 EPOCH_STOP=2000 ./run_train_p12.sh
+# epoch 3: tool_ctx_read2 reward, 300-update LR schedule, keeps all-correct groups with reward spread >= 0.03
+EPOCH_STOP=3000 ./run_train_p12.sh
 # stop: touch runs/p12_mh4_r32/STOP; resume: re-run the same command
 ```

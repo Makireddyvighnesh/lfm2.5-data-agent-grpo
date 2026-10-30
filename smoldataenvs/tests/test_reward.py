@@ -132,3 +132,31 @@ def test_capped_tool_outputs_counts_each_long_tool_message_once():
     assert capped_tool_outputs({"result": {"turns": turns}}, 4000) == 2
     assert capped_tool_outputs({"turns": turns}, 0) is None
     assert capped_tool_outputs({"turns": [{"turn": 0}]}, 4000) is None  # no request messages recorded
+
+
+def test_tool_ctx_read2_charges_capped_outputs_on_correct_answers_only():
+    from pirl.reward import tool_ctx_read2_value, tool_ctx_read_value
+    assert tool_ctx_read2_value(1.0, 5, 4_900, 900, 0, 2) == tool_ctx_read_value(1.0, 5, 4_900, 900, 0, 2)
+    assert tool_ctx_read2_value(0.0, 5, 4_900, 900, 0, 3) == 0.0                   # wrong: no capped penalty
+    assert abs(tool_ctx_read2_value(0.0, 5, 4_900, 900, 2, 3) - (-0.2)) < 1e-9    # unknown tools still cost
+    assert tool_ctx_read2_value(None, 5, 4_900, 900, 1, 1) is None
+
+
+def test_keep_group_reward_spread_keeps_ranked_all_correct_groups():
+    from pirl.grpo import keep_group
+    row = lambda reward: {"reward": reward, "correct": 1.0, "sequences": [1]}
+    ranked, flat = [row(1.15), row(1.05)], [row(1.10), row(1.08)]
+    assert not keep_group(ranked) and not keep_group(ranked, min_reward_spread=0.0)
+    assert keep_group(ranked, min_reward_spread=0.05) and not keep_group(flat, min_reward_spread=0.05)
+    assert not keep_group([row(1.1), {"reward": None, "correct": None, "sequences": []}], min_reward_spread=0.01)
+
+
+def test_skip_reason_can_revisit_solved_tasks():
+    import types
+    from pirl.grpo import skip_reason
+    off = types.SimpleNamespace(skip_wrong_frac=0.5)
+    on = types.SimpleNamespace(skip_wrong_frac=0.5, solved_revisit_frac=0.5)
+    assert skip_reason(["c"], 0.1, off) == "solved"       # default: solved tasks are never revisited
+    assert skip_reason(["c"], 0.1, on) is None and skip_reason(["c"], 0.7, on) == "solved"
+    assert skip_reason(["m", "w"], 0.3, on) == "wrong" and skip_reason(["m", "w"], 0.6, on) is None
+    assert skip_reason(["m"], 0.0, on) is None
