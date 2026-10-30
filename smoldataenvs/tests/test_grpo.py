@@ -90,3 +90,33 @@ def test_save_state_is_atomic_and_replaces(tmp_path):
     assert json.loads((dest / "state.json").read_text())["step"] == 2
     assert (dest / "adapter" / "tag").read_text() == "b"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["state_latest"]  # no tmp/old leftovers
+
+
+def test_unknown_tool_calls_uses_the_tools_offered_in_each_request():
+    from pirl.grpo import unknown_tool_calls
+    tools = lambda *names: [{"type": "function", "function": {"name": n}} for n in names]
+    payload = {"turns": [
+        {"request_tools": tools("Bash", "Read"), "tool_calls": [{"name": "bash"}, {"name": "Read"}]},
+        {"request_tools": tools("bash", "read"), "tool_calls": [{"name": "finish"}]},
+        {"request_tools": [], "tool_calls": [{"name": "anything"}]},  # no tool list offered: not counted
+    ]}
+    assert unknown_tool_calls(payload) == 2
+    assert unknown_tool_calls({"result": {"turns": payload["turns"]}}) == 2
+    assert unknown_tool_calls({}) is None
+    # a training-trace-shaped payload (turns without request_tools) must read as unknown, not as 0
+    assert unknown_tool_calls({"turns": [{"tool_calls": [{"name": "bash"}]}]}) is None
+
+
+def test_keep_group_optionally_keeps_unknown_tool_contrast():
+    from pirl.grpo import keep_group
+    r = lambda correct, unknown: {"reward": float(correct), "correct": float(correct), "sequences": [1],
+                                  "unknown_tool_calls": unknown}
+    all_wrong_same = [r(0, 2), r(0, 2)]
+    all_wrong_differ = [r(0, 0), r(0, 5)]
+    capped_same = [r(0, 3), r(0, 7)]  # both hit the 3-call penalty cap: no extra signal
+    mixed = [r(1, 0), r(0, 0)]
+    assert keep_group(mixed) and keep_group(mixed, True)
+    assert not keep_group(all_wrong_differ)
+    assert keep_group(all_wrong_differ, True)
+    assert not keep_group(all_wrong_same, True)
+    assert not keep_group(capped_same, True)

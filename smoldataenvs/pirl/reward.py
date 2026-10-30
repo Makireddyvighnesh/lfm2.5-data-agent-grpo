@@ -213,6 +213,74 @@ def tool_ctx_reward(outcome):
                           getattr(outcome, "first_prompt", None))
 
 
+# Variant `tool_ctx_err` (2026-10-28): `tool_ctx` minus a penalty for calls to tools the harness did not offer in that
+# request (e.g. `finish` in Pi/Codex/OpenCode, lowercase `bash` in Claude Code, `bash` in Prime Agent). Applied to
+# every scored rollout, so within a group a wrong answer with invented tools ranks below a wrong answer without.
+UNKNOWN_TOOL_PENALTY = 0.1
+UNKNOWN_TOOL_PENALTY_CAP = 0.3
+
+
+def unknown_tool_penalty(n_unknown, *, per_call=UNKNOWN_TOOL_PENALTY, cap=UNKNOWN_TOOL_PENALTY_CAP):
+    """per_call per unknown-tool call, at most cap. Unknown count -> 0."""
+    return 0.0 if not n_unknown else min(cap, per_call * n_unknown)
+
+
+def tool_ctx_err_value(env_reward, n_tool_calls, peak_context, first_prompt, n_unknown_tools):
+    base = tool_ctx_value(env_reward, n_tool_calls, peak_context, first_prompt)
+    return None if base is None else base - unknown_tool_penalty(n_unknown_tools)
+
+
+def tool_ctx_err_reward(outcome):
+    return tool_ctx_err_value(outcome.env_reward, outcome.tool_call_count, getattr(outcome, "peak_context", None),
+                              getattr(outcome, "first_prompt", None), getattr(outcome, "unknown_tool_calls", None))
+
+
+# Variant `tool_ctx_read` (2026-10-29, p12 epoch 2): `tool_ctx_err` with two context terms that bite where the
+# training rollouts actually are. p12 e1: own context averaged 3.5-5k, so the flat 15k own-context bonus was paid to
+# almost every correct rollout and gave no gradient; on held-out Claude Code the model's own text (~7k tokens) plus
+# the ~10.8k harness prompt exhausted the 24k window in 12% of rollouts.
+# - Own-context bonus graded instead of flat: 0.1 at <= 4k own tokens, linear to 0 at 12k (correct answers only).
+# - Capped-output penalty: 0.05 per tool output the proxy cut to its head and tail (a whole-file `read`/`cat`), at
+#   most 0.2, on every scored rollout like the unknown-tool penalty. No prompt hint: the model finds `head`, pandas
+#   or `read` with a limit by itself.
+OWN_CONTEXT_FULL, OWN_CONTEXT_NONE = 4_000, 12_000
+CAPPED_OUTPUT_PENALTY = 0.05
+CAPPED_OUTPUT_PENALTY_CAP = 0.2
+
+
+def own_context_graded_bonus(peak_context, first_prompt, *, bonus=0.1):
+    """bonus * clip((12k - own) / 8k, 0, 1), own = peak - first prompt: 4k -> 0.1, 8k -> 0.05, 12k -> 0. Unknown -> 0."""
+    if peak_context is None or first_prompt is None:
+        return 0.0
+    own = peak_context - first_prompt
+    return bonus * min(1.0, max(0.0, (OWN_CONTEXT_NONE - own) / (OWN_CONTEXT_NONE - OWN_CONTEXT_FULL)))
+
+
+def capped_output_penalty(n_capped, *, per_output=CAPPED_OUTPUT_PENALTY, cap=CAPPED_OUTPUT_PENALTY_CAP):
+    """per_output per capped tool output, at most cap. Unknown count -> 0."""
+    return 0.0 if not n_capped else min(cap, per_output * n_capped)
+
+
+def tool_ctx_read_value(env_reward, n_tool_calls, peak_context, first_prompt, n_unknown_tools, n_capped_outputs):
+    """Correct: 1 + tool bonus + graded own-context bonus, in [1.0, 1.2); wrong or missing: 0. Then minus the
+    unknown-tool penalty (<= 0.3) and the capped-output penalty (<= 0.2). A correct answer (>= 0.5) still beats
+    any wrong one (<= 0)."""
+    if env_reward is None:
+        return None
+    if float(env_reward) < 1.0:
+        base = 0.0
+    else:
+        base = 1.0 + tool_efficiency_bonus(n_tool_calls) + own_context_graded_bonus(peak_context, first_prompt)
+    return base - unknown_tool_penalty(n_unknown_tools) - capped_output_penalty(n_capped_outputs)
+
+
+def tool_ctx_read_reward(outcome):
+    return tool_ctx_read_value(outcome.env_reward, outcome.tool_call_count, getattr(outcome, "peak_context", None),
+                               getattr(outcome, "first_prompt", None), getattr(outcome, "unknown_tool_calls", None),
+                               getattr(outcome, "capped_tool_outputs", None))
+
+
 REWARDS = {"correctness": correctness_only, "calls": rollout_reward, "efficiency": efficiency_reward,
            "context": context_reward, "tool": tool_reward, "tool_context": tool_context_reward,
-           "tool_fast": tool_fast_reward, "tool_ctx": tool_ctx_reward}
+           "tool_fast": tool_fast_reward, "tool_ctx": tool_ctx_reward, "tool_ctx_err": tool_ctx_err_reward,
+           "tool_ctx_read": tool_ctx_read_reward}

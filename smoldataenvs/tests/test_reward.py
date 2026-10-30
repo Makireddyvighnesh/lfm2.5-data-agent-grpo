@@ -92,3 +92,43 @@ def test_lr_schedule():
     assert abs(lr_at(a, 0) - 3e-6) < 1e-12 and abs(lr_at(a, 9) - 3e-5) < 1e-12
     assert abs(lr_at(a, 10) - 3e-5) < 1e-12 and abs(lr_at(a, 60) - 1.65e-5) < 1e-12 and abs(lr_at(a, 110) - 3e-6) < 1e-12
     assert lr_at(types.SimpleNamespace(lr=1e-5, steps=5), 3) == 1e-5
+
+
+def test_tool_ctx_err_penalises_unknown_tools_on_every_scored_rollout():
+    from pirl.reward import tool_ctx_err_value, tool_ctx_value
+    base = tool_ctx_value(1.0, 5, 3000, 900)
+    assert tool_ctx_err_value(1.0, 5, 3000, 900, 0) == base
+    assert abs(tool_ctx_err_value(1.0, 5, 3000, 900, 2) - (base - 0.2)) < 1e-9
+    assert abs(tool_ctx_err_value(1.0, 5, 3000, 900, 9) - (base - 0.3)) < 1e-9  # capped
+    assert abs(tool_ctx_err_value(0.0, 5, 3000, 900, 1) - (-0.1)) < 1e-9  # wrong answers are penalised too
+    assert tool_ctx_err_value(0.0, 5, 3000, 900, None) == 0.0
+    assert tool_ctx_err_value(None, 5, 3000, 900, 3) is None  # infra failure stays unscorable
+
+
+def test_tool_ctx_read_grades_own_context_and_penalises_capped_outputs():
+    from pirl.reward import tool_ctx_read_value, tool_efficiency_bonus
+    tool = tool_efficiency_bonus(5)
+    assert abs(tool_ctx_read_value(1.0, 5, 4_900, 900, 0, 0) - (1.1 + tool)) < 1e-9    # own 4k: full bonus
+    assert abs(tool_ctx_read_value(1.0, 5, 8_900, 900, 0, 0) - (1.05 + tool)) < 1e-9   # own 8k: half
+    assert abs(tool_ctx_read_value(1.0, 5, 13_900, 900, 0, 0) - (1.0 + tool)) < 1e-9   # own 13k: none
+    assert abs(tool_ctx_read_value(1.0, 5, 4_900, 900, 0, 2) - (1.0 + tool)) < 1e-9    # 2 capped outputs: -0.1
+    assert abs(tool_ctx_read_value(1.0, 5, 4_900, 900, 9, 9) - (0.6 + tool)) < 1e-9    # both penalties at their caps
+    assert abs(tool_ctx_read_value(0.0, 5, 4_900, 900, 1, 1) - (-0.15)) < 1e-9         # wrong: penalties only
+    assert tool_ctx_read_value(0.0, 5, 4_900, 900, None, None) == 0.0
+    assert tool_ctx_read_value(None, 5, 4_900, 900, 3, 3) is None
+
+
+def test_capped_tool_outputs_counts_each_long_tool_message_once():
+    from pirl.grpo import capped_tool_outputs
+    long, short = "x" * 4001, "y" * 10
+    turns = [{"request_messages": [{"role": "user", "content": "q"}]},
+             {"request_messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": ""},
+                                   {"role": "tool", "content": long}, {"role": "tool", "content": short}]},
+             {"request_messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": ""},
+                                   {"role": "tool", "content": long}, {"role": "tool", "content": short},
+                                   {"role": "assistant", "content": ""},
+                                   {"role": "tool", "content": [{"type": "text", "text": long}]}]}]
+    assert capped_tool_outputs({"turns": turns}, 4000) == 2   # the first long output is not recounted on turn 3
+    assert capped_tool_outputs({"result": {"turns": turns}}, 4000) == 2
+    assert capped_tool_outputs({"turns": turns}, 0) is None
+    assert capped_tool_outputs({"turns": [{"turn": 0}]}, 4000) is None  # no request messages recorded

@@ -47,6 +47,56 @@ def _agent_seconds(trial_dir):
         return None
 
 
+def unknown_tool_calls(result_payload):
+    """Calls to a tool name the harness did not offer in that same request. Needs the rollout RESULT payload
+    (`session.result.model_dump()` or a capture's "result"): its turns carry `request_tools` and `tool_calls`;
+    the training trace's turns do not. Turns offering no tools (text-only harness turns) are not counted.
+    None when no turn carries a tool list, so a missing field can never read as "0 unknown calls"."""
+    turns = (result_payload or {}).get("turns")
+    if turns is None:
+        turns = ((result_payload or {}).get("result") or {}).get("turns")
+    n, seen = 0, False
+    for t in turns or []:
+        offered = {((x.get("function") or x).get("name")) for x in (t.get("request_tools") or [])}
+        if not offered:
+            continue
+        seen = True
+        n += sum(1 for c in (t.get("tool_calls") or []) if (c.get("name") or (c.get("function") or {}).get("name")) not in offered)
+    return n if seen else None
+
+
+def _text_len(content):
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):  # same rule as serve_harbor.py's cap: each text part is capped on its own
+        return max((len(p.get("text") or "") for p in content if isinstance(p, dict) and p.get("type") == "text"),
+                   default=0)
+    return 0
+
+
+def capped_tool_outputs(result_payload, cap):
+    """Tool outputs the capture proxy cut to head + tail (HARBOR_TOOL_OUTPUT_CAP chars): a whole-file read or dump.
+    The result's `request_messages` are recorded before the cap, so a tool message longer than `cap` was capped.
+    Each output is counted once, on the turn where it is new (the trailing tool messages of that request), as the
+    proxy's `tool_output_capped` event does. None when no turn carries request messages, or the cap is off."""
+    turns = (result_payload or {}).get("turns")
+    if turns is None:
+        turns = ((result_payload or {}).get("result") or {}).get("turns")
+    if not cap:
+        return None
+    n, seen = 0, False
+    for t in turns or []:
+        msgs = t.get("request_messages")
+        if not msgs:
+            continue
+        seen = True
+        i = len(msgs)
+        while i > 0 and isinstance(msgs[i - 1], dict) and msgs[i - 1].get("role") == "tool":
+            i -= 1
+        n += sum(1 for m in msgs[i:] if _text_len(m.get("content")) > cap)
+    return n if seen else None
+
+
 def _atif_tool_calls(trial_dir):
     """Tool actions in Harbor's ATIF trajectory (the blog's count_tools): works for every harness, including
     mini-swe-agent's text actions. None when the file is missing or its action ids are missing/repeated."""
@@ -79,6 +129,8 @@ def arguments():
                         "(a function of the update number only, so resume needs no scheduler state)")
     p.add_argument("--warmup-steps", type=int, default=0)
     p.add_argument("--min-lr", type=float, default=0.0)
+    p.add_argument("--schedule-steps", type=int, default=0,
+                   help="cosine span in updates (0 = --steps); lets a run pause at --steps and resume to a later target")
     p.add_argument("--lora-r", type=int, default=32)
     p.add_argument("--lora-alpha", type=int, default=64)
     p.add_argument("--epsilon", type=float, default=0.2)
@@ -93,7 +145,7 @@ def arguments():
     p.add_argument("--hard-generations", type=int, default=8,
                    help="(regret) rollouts for prompts that scored 0 last visit; others use --num-generations")
     p.add_argument("--new-frac", type=float, default=0.5, help="(regret) share of each batch drawn from unseen prompts")
-    p.add_argument("--reward", choices=["correctness", "calls", "efficiency", "context", "tool", "tool_context", "tool_fast", "tool_ctx"], default="calls",
+    p.add_argument("--reward", choices=["correctness", "calls", "efficiency", "context", "tool", "tool_context", "tool_fast", "tool_ctx", "tool_ctx_err", "tool_ctx_read"], default="calls",
                    help="A: correctness, B: calls (blog recipe), C: efficiency (calls+context+generation), "
                         "context: correctness + <=0.1 bonus for low peak context")
     p.add_argument("--harnesses", default="pi",
@@ -138,6 +190,36 @@ def arguments():
                    help="Redo the batch if more than this share of rollouts failed for infrastructure reasons")
     p.add_argument("--max-infra-retries", type=int, default=5, help="Consecutive redo limit before exiting")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--dynamic-sampling", action="store_true",
+                   help="DAPO dynamic sampling (needs --stream-groups): drop finished groups whose rollouts are all "
+                        "correct or all wrong and submit new tasks until `groups` groups with correctness contrast "
+                        "are ready; dropped rollouts go to filtered_rollouts.jsonl")
+    p.add_argument("--dynamic-max-drop", type=int, default=32,
+                   help="dynamic sampling: after this many dropped groups in one update, accept groups unfiltered")
+    p.add_argument("--allow-change", action="append", default=[], metavar="KEY",
+                   help="let a resume change this fixed config key (repeatable); logged to config_changes.jsonl")
+    p.add_argument("--stop-at-pos", type=int, default=0,
+                   help="streaming: submit no task position >= this (e.g. 1000 = end of epoch 1 on 1000 tasks), "
+                        "train on the remaining groups, then stop (0 = off)")
+    p.add_argument("--async-groups", type=int, default=0,
+                   help="streaming: keep this many UNFINISHED groups generating at all times (finished groups wait "
+                        "for the next update instead of holding a slot); 0 = keep groups+stream_groups in flight")
+    p.add_argument("--dynamic-skip", action="store_true",
+                   help="dynamic sampling: never revisit a task once a visit was all correct; skip a revisit of a "
+                        "task whose last visit was all wrong with probability --skip-wrong-frac (deterministic per "
+                        "task and visit); skips go to skipped_tasks.jsonl")
+    p.add_argument("--dynamic-keep-tool-contrast", action="store_true",
+                   help="dynamic sampling: also keep groups whose rollouts differ in unknown-tool calls (the "
+                        "tool_ctx_err penalty then teaches within all-correct / all-wrong groups)")
+    p.add_argument("--probe-hard", type=int, default=0,
+                   help="dynamic sampling: a task whose last visit was all wrong first gets this many rollouts; the "
+                        "group is completed to --num-generations only if a probe succeeds (or differs in unknown-tool "
+                        "calls with --dynamic-keep-tool-contrast), otherwise dropped at probe cost (0 = off)")
+    p.add_argument("--skip-wrong-frac", type=float, default=0.5,
+                   help="dynamic skip: probability of skipping a revisit after an all-wrong visit")
+    p.add_argument("--tool-output-cap", type=int, default=int(os.environ.get("HARBOR_TOOL_OUTPUT_CAP") or 4000),
+                   help="chars above which the capture proxy caps a tool output (Harbor's HARBOR_TOOL_OUTPUT_CAP); "
+                        "used to count capped outputs per rollout (reward tool_ctx_read); 0 = off")
     p.add_argument("--stream-groups", type=int, default=0,
                    help="Keep groups+K task groups in flight and train on the first `groups` that finish; "
                         "unfinished rollouts keep their (older) adapter and pause in vLLM while the trainer runs. "
@@ -288,18 +370,24 @@ def run_rollout(args, split_path, index, task, model_name, reward_fn, context=No
                                         "tool_call_count": tool_calls, "final_context": final_context,
                                         "peak_context": peak_context,
                                         "first_prompt": len(turns[0].prompt_ids) if turns else None,
+                                        "unknown_tool_calls": unknown_tool_calls(result_payload),
+                                        "capped_tool_outputs": capped_tool_outputs(
+                                            result_payload, getattr(args, "tool_output_cap", 0)),
                                         "agent_seconds": _agent_seconds(Path(args.trials) / result.trial_name),
                                         "generated_tokens": sum(completion_lens)})
         row.update(
             correct=None if env_reward is None else float(env_reward),
             reward=reward_fn(outcome),
             tool_calls=tool_calls, parsed_tool_calls=parsed_calls, atif_tool_calls=atif_calls,
+            unknown_tool_calls=outcome.unknown_tool_calls,
+            capped_tool_outputs=outcome.capped_tool_outputs,
             first_prompt=len(turns[0].prompt_ids) if turns else None,
             model_calls=len(turns),
             generated_tokens=sum(completion_lens),
             agent_seconds=outcome.agent_seconds,
             final_context=final_context,
             peak_context=peak_context,
+            own_context=(peak_context - len(turns[0].prompt_ids)) if turns else None,
             peak_le_10k=float(peak_context <= 10_000),
             truncated=any(n >= MAX_TOKENS for n in completion_lens),
             forks=tally["fork"],
@@ -380,6 +468,19 @@ def grpo_stats(groups, scored, optimizer):
     return out
 
 
+def unknown_tool_contrast(group, cap=3):
+    """True when the group's scored rollouts differ in (capped) unknown-tool calls or capped tool outputs, i.e. the
+    tool-error / capped-output penalty alone gives the group a learning signal."""
+    vals = {(min(cap, r.get("unknown_tool_calls") or 0), min(4, r.get("capped_tool_outputs") or 0))
+            for r in group if r.get("reward") is not None and r["sequences"]}
+    return len(vals) > 1
+
+
+def keep_group(group, tool_contrast=False):
+    """Dynamic sampling: keep a group with correctness contrast, or (optionally) unknown-tool contrast."""
+    return correctness_contrast(group) or (tool_contrast and unknown_tool_contrast(group))
+
+
 def correctness_contrast(group):
     """True when the group's rollouts differ in correctness (not only in efficiency bonus)."""
     vals = {r.get("correct") for r in group if r.get("reward") is not None and r["sequences"]}
@@ -442,7 +543,7 @@ def lr_at(args, step):
     warm = max(0, getattr(args, "warmup_steps", 0))
     if step < warm:
         return args.lr * (step + 1) / warm
-    span = max(1, args.steps - warm)
+    span = max(1, (getattr(args, "schedule_steps", 0) or args.steps) - warm)
     frac = min(1.0, (step - warm) / span)
     lo = getattr(args, "min_lr", 0.0)
     return lo + 0.5 * (args.lr - lo) * (1 + math.cos(math.pi * frac))
@@ -703,6 +804,12 @@ def main():
                  "lr", "epsilon", "epsilon_high", "step_limit", "agent_timeout", "task_limit", "task_file",
                  "std_floor", "init_adapter", "is_correction", "tis_cap", "root_boost")
         changed = [key for key in fixed if key in previous and previous[key] != config.get(key)]
+        allowed = [key for key in changed if key in (getattr(args, "allow_change", None) or [])]
+        for key in allowed:
+            append_jsonl(out / "config_changes.jsonl", {"step": state["step"], "key": key, "old": previous[key],
+                                                        "new": config.get(key), "time": time.time()})
+            print(f"config change allowed at step {state['step']}: {key} {previous[key]} -> {config.get(key)}", flush=True)
+        changed = [key for key in changed if key not in allowed]
         if changed:
             raise RuntimeError(f"Resume would change the experiment configuration: {changed}")
     write_json(out / "run_config.json", config)
@@ -738,20 +845,118 @@ def main():
     stream = getattr(args, "stream_groups", 0)
     if stream and sampler:
         raise SystemExit("--stream-groups needs --sampler sequential")
-    if stream and args.concurrency < (args.groups + stream) * args.num_generations:
-        raise SystemExit("--stream-groups: --concurrency must cover (groups + stream_groups) x num_generations")
+    dynamic = getattr(args, "dynamic_sampling", False)
+    if dynamic and not stream:
+        raise SystemExit("--dynamic-sampling needs --stream-groups")
+    run_target = getattr(args, "async_groups", 0)
+    if run_target and not stream:
+        raise SystemExit("--async-groups needs --stream-groups")
+    if stream and args.concurrency < (run_target or args.groups + stream) * args.num_generations:
+        raise SystemExit("--stream-groups: --concurrency must cover (async_groups or groups + stream_groups) x "
+                         "num_generations")
+    skip_on = dynamic and getattr(args, "dynamic_skip", False)
+    task_hist = {}  # task index -> visit outcomes in position order: c (all correct), w (all wrong), m (mixed), s (skipped)
+
+    def outcome(gr):
+        vals = {r.get("correct") for r in gr if r.get("reward") is not None and r["sequences"]}
+        return None if not vals else ("m" if len(vals) > 1 else ("c" if vals == {1.0} or vals == {1} else "w"))
+
+    if skip_on:  # rebuild visit history from the logs (rollouts without "pos" predate this flag: first pass)
+        visits = {}
+        for name in ("rollouts.jsonl", "filtered_rollouts.jsonl"):
+            if (out / name).exists():
+                for line in (out / name).open():
+                    r = json.loads(line)
+                    v = visits.setdefault(r["batch_id"], {"pos": r.get("pos", -1), "idx": r["task_index"], "rows": []})
+                    v["rows"].append({"reward": r.get("reward"), "correct": r.get("correct"), "sequences": True})
+        events = [(v["pos"], v["idx"], outcome(v["rows"])) for v in visits.values()]
+        if (out / "skipped_tasks.jsonl").exists():
+            events += [(e["pos"], e["idx"], "s") for e in map(json.loads, (out / "skipped_tasks.jsonl").open())]
+        for _, idx, o in sorted(events, key=lambda e: e[0]):
+            if o:
+                task_hist.setdefault(idx, []).append(o)
+        print(f"dynamic skip: history for {len(task_hist)} tasks", flush=True)
     inflight = []  # streaming: {"pos", "idx", "futures", "model"} in submission order
     requeue = list(state.get("stream_pending") or [])  # positions in flight at the last save: resubmit first
     next_pos = state.get("stream_next", cursor)
     last_pos = args.steps * args.groups  # never submit past the last update's tasks
+    if dynamic:
+        last_pos = float("inf")  # dropped groups are replaced, so positions run past steps x groups (order wraps)
+    if stream and getattr(args, "stop_at_pos", 0):
+        last_pos = args.stop_at_pos
+        requeue = [pos for pos in requeue if pos < last_pos]
+
+    probe_n = getattr(args, "probe_hard", 0) if dynamic else 0
+    probe_stats = {"started": 0, "extended": 0, "dropped": 0}
 
     def submit_group(pos):
         idx = order[pos % len(order)]
         ctx = {"run_id": out.name, "intended_step": step + 1, "batch_id": uuid.uuid4().hex, "batch_attempt": 1,
-               "policy_version": step, "template": "prefix-chain" if PREFIX_CHAIN_TEMPLATE else "native"}
-        futs = [pool.submit(run_rollout, args, split_path, idx, tasks[idx], current, reward_fn, ctx)
-                for _ in range(args.num_generations)]
-        inflight.append({"pos": pos, "idx": idx, "futures": futs, "model": current})
+               "policy_version": step, "template": "prefix-chain" if PREFIX_CHAIN_TEMPLATE else "native", "pos": pos}
+        visits = [o for o in task_hist.get(idx, []) if o != "s"]
+        probe = bool(probe_n) and probe_n < args.num_generations and bool(visits) and visits[-1] == "w"
+        n = probe_n if probe else args.num_generations
+        futs = [pool.submit(run_rollout, args, split_path, idx, tasks[idx], current, reward_fn, ctx) for _ in range(n)]
+        inflight.append({"pos": pos, "idx": idx, "futures": futs, "model": current, "probe": probe, "ctx": ctx})
+        probe_stats["started"] += probe
+
+    def resolve_probes(dropped):
+        """Finished probe groups: complete them to num_generations if they show signal, else drop them."""
+        for g in [g for g in inflight if g.get("probe") and all(f.done() for f in g["futures"])]:
+            gr = [f.result() for f in g["futures"]]
+            signal = (any(r.get("correct") == 1 for r in gr)
+                      or (getattr(args, "dynamic_keep_tool_contrast", False) and unknown_tool_contrast(gr))
+                      or sum(map(infra_failed, gr)) * 2 >= len(gr))  # outages go on to the infra check
+            if signal:
+                ctx = dict(g["ctx"], intended_step=step + 1, policy_version=step)  # same batch_id: one group
+                g["futures"] += [pool.submit(run_rollout, args, split_path, g["idx"], tasks[g["idx"]], current,
+                                             reward_fn, ctx) for _ in range(args.num_generations - len(gr))]
+                g["probe"], g["model"] = False, current
+                probe_stats["extended"] += 1
+            else:
+                inflight.remove(g)
+                dropped.append((g, gr))
+                probe_stats["dropped"] += 1
+                if outcome(gr):
+                    task_hist.setdefault(g["idx"], []).append(outcome(gr))
+
+    skipped_now = []
+
+    def want_more():
+        if not (requeue or next_pos < last_pos):
+            return False
+        if run_target:
+            return sum(not all(f.done() for f in g["futures"]) for g in inflight) < run_target
+        return len(inflight) < args.groups + stream
+
+    def fill():
+        nonlocal next_pos
+        while want_more():
+            if requeue:
+                submit_group(requeue.pop(0))
+                continue
+            for _ in range(len(order)):  # never loop forever when every task would be skipped
+                if next_pos >= last_pos:
+                    break
+                idx = order[next_pos % len(order)]
+                h = task_hist.get(idx, [])
+                visits = [o for o in h if o != "s"]
+                if not skip_on or not visits:
+                    break
+                solved = "c" in visits  # solved 8/8 once: removed for the rest of the run
+                coin = random.Random(f"{args.seed}-{idx}-{len(h)}").random()  # resume-safe coin per revisit
+                if not (solved or (visits[-1] == "w" and coin < getattr(args, "skip_wrong_frac", 0.5))):
+                    break
+                append_jsonl(out / "skipped_tasks.jsonl", {"pos": next_pos, "idx": idx, "step": step + 1,
+                                                           "last": "".join(h[-2:]),
+                                                           "reason": "solved" if solved else "wrong"})
+                task_hist[idx].append("s")
+                skipped_now.append(next_pos)
+                next_pos += 1
+            if next_pos >= last_pos:
+                break
+            submit_group(next_pos)
+            next_pos += 1
 
     def stream_extra():
         return {"stream_next": next_pos, "stream_pending": [g["pos"] for g in inflight] + requeue} if stream else None
@@ -763,23 +968,47 @@ def main():
         t_step = time.time()
         # 1. generate G groups x N rollouts with the current adapter
         if stream:
-            # keep groups + K groups in flight; train on the oldest `groups` that are complete
-            while len(inflight) < args.groups + stream and (requeue or next_pos < last_pos):
-                if requeue:
-                    submit_group(requeue.pop(0))
-                else:
-                    submit_group(next_pos)
-                    next_pos += 1
-            while sum(all(f.done() for f in g["futures"]) for g in inflight) < min(args.groups, len(inflight)):
+            # keep groups + K groups (or async_groups unfinished groups) in flight; train on the first `groups`
+            # that are complete
+            skipped_now.clear()
+            fill()
+            dropped = []
+            for k in probe_stats:
+                probe_stats[k] = 0
+            while True:
+                if probe_n:
+                    resolve_probes(dropped)
+                if dynamic and len(dropped) < args.dynamic_max_drop:
+                    for g in [g for g in inflight if all(f.done() for f in g["futures"]) and not g.get("probe")]:
+                        gr = [f.result() for f in g["futures"]]
+                        # mostly-infra groups stay, so the outage check below still sees them
+                        if (not keep_group(gr, getattr(args, "dynamic_keep_tool_contrast", False))
+                                and sum(map(infra_failed, gr)) * 2 < len(gr)):
+                            inflight.remove(g)
+                            dropped.append((g, gr))
+                            if outcome(gr):
+                                task_hist.setdefault(g["idx"], []).append(outcome(gr))
+                if dynamic or run_target:
+                    fill()
+                ready = [g for g in inflight if all(f.done() for f in g["futures"]) and not g.get("probe")]
+                if len(ready) >= min(args.groups, sum(not g.get("probe") for g in inflight) or len(inflight)):
+                    break
                 if (out / "STOP").exists():
                     break
                 wait([f for g in inflight for f in g["futures"] if not f.done()], timeout=30,
                      return_when=FIRST_COMPLETED)
+            for g, gr in dropped:
+                for r in gr:
+                    append_jsonl(out / "filtered_rollouts.jsonl",
+                                 {k: v for k, v in r.items() if k != "sequences"} | {"step": step + 1, "pos": g["pos"]})
             if (out / "STOP").exists():
                 print(f"STOP requested; stopping at saved step {step} ({len(inflight)} groups in flight dropped)",
                       flush=True)
                 break
-            chosen = [g for g in inflight if all(f.done() for f in g["futures"])][: args.groups]
+            chosen = [g for g in inflight if all(f.done() for f in g["futures"]) and not g.get("probe")][: args.groups]
+            if not chosen and not inflight and not requeue and next_pos >= last_pos:
+                print(f"all task positions < {last_pos} are done; stopping at saved step {step}", flush=True)
+                break
             for g in chosen:
                 inflight.remove(g)
             batch = [g["idx"] for g in chosen]
@@ -844,6 +1073,10 @@ def main():
                 time.sleep(60)
                 continue
         infra_streak = 0
+        if stream:
+            for idx, gr in zip(batch, groups):
+                if outcome(gr):
+                    task_hist.setdefault(idx, []).append(outcome(gr))
         if sampler:
             prev = {idx: sampler.stats.get(idx) for idx in batch}
             for idx, gr in zip(batch, groups):
@@ -921,6 +1154,13 @@ def main():
             "submit_rate": mean("submitted", rollouts), "truncated_rate": mean("truncated"),
             "context_exhausted_rate": mean("context_exhausted", rollouts),
             "tool_calls_mean": mean("tool_calls"), "model_calls_mean": mean("model_calls"),
+            "unknown_tool_calls_mean": mean("unknown_tool_calls", rollouts),
+            **{f"unknown_tool_calls_{h}": mean("unknown_tool_calls", [r for r in rollouts if r.get("harness") == h])
+               for h in sorted({r.get("harness") for r in rollouts} - {None})},
+            "capped_tool_outputs_mean": mean("capped_tool_outputs", rollouts),
+            **{f"capped_tool_outputs_{h}": mean("capped_tool_outputs", [r for r in rollouts if r.get("harness") == h])
+               for h in sorted({r.get("harness") for r in rollouts} - {None})},
+            "own_context_mean": mean("own_context"),
             "generated_tokens_mean": mean("generated_tokens"), "final_context_mean": mean("final_context"),
             "unscorable": len(rollouts) - len(scored),
             "capture_errors": sum(1 for r in rollouts if r.get("capture_error")),
@@ -932,6 +1172,12 @@ def main():
             "policy_lag_mean": (sum(step - 1 - r.get("policy_version", step - 1) for r in rollouts) / len(rollouts))
                                if rollouts else None,
             "groups_in_flight": len(inflight),
+            **({"dyn_dropped_groups": len(dropped),
+                "dyn_dropped_all_correct": sum(all(r.get("correct") == 1 for r in gr if r.get("reward") is not None)
+                                               for _, gr in dropped),
+                "dyn_next_pos": next_pos, "dyn_skipped": len(skipped_now),
+                **({f"probe_{k}": v for k, v in probe_stats.items()} if probe_n else {}),
+                "groups_running": sum(not all(f.done() for f in g["futures"]) for g in inflight)} if dynamic else {}),
             "sync_s": round(sync_s, 1), "step_s": round(time.time() - t_step, 1), **tstats,
             "process_fds": len(os.listdir("/proc/self/fd")),
             "process_threads": threading.active_count(),
@@ -963,11 +1209,27 @@ def main():
               f"client_loops={rec['openenv_loop_threads']}", flush=True)
         pending_batch = None
         attempt = 0
-    pool.shutdown()
+    # Streaming leaves groups in flight at exit; their positions are in the saved state (stream_pending) and are
+    # resubmitted on resume, so do not wait up to agent_timeout for rollouts nobody will train on.
+    abandoned = len(inflight) if stream else 0
+    if abandoned:
+        print(f"abandoning {abandoned} in-flight groups (positions saved for resubmission)", flush=True)
+        if not args.no_sleep:
+            try:
+                engine.sleep(mode="abort")  # abort their vLLM requests so the agents end quickly
+            except Exception as exc:  # noqa: BLE001
+                print(f"vLLM abort-sleep failed: {exc}", flush=True)
+        pool.shutdown(wait=False, cancel_futures=True)
+    else:
+        pool.shutdown()
     engine.http.close()
     if step < args.steps:
         write_json(out / "results.json", {"run_id": out.name, "completed_steps": step,
                    "target_steps": args.steps, "status": "stopped"})
+    if abandoned:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)  # worker threads still block in Harbor calls; interpreter exit would join them
 
 
 if __name__ == "__main__":

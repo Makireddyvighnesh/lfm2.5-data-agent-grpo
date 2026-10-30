@@ -6,8 +6,8 @@ with code inside a sandbox and writes one answer). The goal was to match or beat
 multi-harness RL result (Adithya's blog) under much tighter hardware: **one NVIDIA L4 (23 GB)**,
 FP8 sampling and training, a 24k context window instead of 128k, and no prompt hints.
 
-Full experiment log: [EXPERIMENTS.md](EXPERIMENTS.md). Benchmark and setup flaws: [FINDINGS.md](FINDINGS.md).
-Plan history: [PLAN.md](PLAN.md).
+Full experiment log: [EXPERIMENTS.md](EXPERIMENTS.md). This repo holds the scripts for the current run, p12
+(see [Current run: p12](#current-run-p12)); scripts of earlier runs (p3-p11) are not included.
 LoRA weights (not in this repo): [makireddyvighnesh/lfm2.5-2.6b-data-agent-lora](https://huggingface.co/makireddyvighnesh/lfm2.5-2.6b-data-agent-lora) (private; root = p8 u200, `p9_u120/`).
 
 ## Headline results (test250, the blog's test split)
@@ -31,19 +31,13 @@ pass@1. r4 = 4 attempts per task (1,000 per cell, about ±1.5 pts); r1 = 1 attem
 
 Val118 (our own 118-task holdout from the eval split), Pi, r1: base 39.8 (thinking on), p7 u350 53.4, p8 u200 60.2.
 
-![test250 pass@1 by harness](docs/plots/test250_results.png)
-
 ## Training curves
 
-p8 (epoch 1, updates 1-200) and p9 (epoch 2, updates 201-320). Regenerate with `python analysis/plot_readme.py`.
-
-![Training accuracy by harness](docs/plots/train_accuracy.png)
+p8 (epoch 1, updates 1-200) and p9 (epoch 2, updates 201-320).
 
 - Codex, the harness the starting checkpoint was weakest on, climbs from about 60% to 75-80% during epoch 1.
 - Epoch 2 batches are harder by construction (only tasks not solved 8/8), so its raw accuracy drops; on the same
   tasks epoch 2 still beat epoch 1 by 5-11 points per window, but test250 showed no gain.
-
-![RL training signals](docs/plots/train_signals.png)
 
 - Reward follows accuracy (correct answers earn 1 plus up to 0.2 in efficiency bonuses).
 - Peak context falls from about 9k to 7.5k tokens and tool calls from about 9 to 8 during epoch 1, as the
@@ -96,30 +90,49 @@ p8 (epoch 1, updates 1-200) and p9 (epoch 2, updates 201-320). Regenerate with `
 - Deciding from r1 val118: same-model reruns flip about 18% of tasks, so 1-attempt differences under about
   5 points are noise. All final claims use r4 on test250.
 
-**Benchmark caveats (see FINDINGS.md)**
+**Benchmark caveats**
 - The pinned grader has false positives and false negatives (about 3.8% error vs blind judges); some tasks are
   unanswerable or under-specified. These affect the blog's numbers and ours equally.
 - "Held-out" test tasks are new questions, but some reuse the same data files as training (no task, notebook or
   question overlap).
 - Our comparison with the blog differs in context (24k vs 128k) and thinking (on vs off).
 
+## Current run: p12
+
+`p12_mh4_r32`: fresh LoRA r32 on the base model, thinking off, 1000 training tasks, 8 tasks x 8 rollouts,
+24k context, FP8 + TIS cap 2, DAPO dynamic sampling. Training harnesses: Pi, mini-swe-agent, Codex, Prime Agent;
+OpenCode and Claude Code are held out (test only). Reward `tool_ctx_err` in epoch 1 (penalty for calling tools the
+harness did not offer); from epoch 2, `tool_ctx_read` (adds a penalty for tool outputs cut by the 4,000-char proxy
+cap and a graded own-context bonus) with Pi's `read` tool enabled. Details in EXPERIMENTS.md.
+
+test250 r1 pass@1:
+
+| Harness | Trained on it? | p12 e1 (u71) | p12 e2 (u127) |
+|---|---|---|---|
+| OpenCode | no | 37.2 | 45.6 |
+| Claude Code | no | 47.2 | 51.6 |
+| Pi | yes | 58.8 (bash only) | 55.2 (bash + read) |
+| mini-swe-agent | yes | 62.9 | 63.6 |
+| Codex CLI | yes | 52.4 | 54.4 |
+| Prime Agent | yes | 47.2 | 54.2 |
+
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `run_train_mh.sh`, `run_train_mh_e2.sh` | p8 and p9 training launchers (wrap `train_grpo.sh`) |
-| `run_train_*.sh`, `run_ablations.sh` | earlier runs (p3-p7) and ablations |
-| `run_test250_p7.sh`, `run_mh_baseline.sh`, `run_p9_confirm.sh`, `eval_checkpoint.sh` | evaluation |
-| `restart_vllm.sh`, `serve_harbor.py`, `runtime_vllm_worker.py`, `root_proxy.py` | vLLM and Harbor serving with runtime patches (upstream OpenEnv/Harbor/TRL left unmodified) |
+| `run_train_p12.sh` | p12 pipeline: Harbor + vLLM startup, training per epoch (`EPOCH_STOP=1000/2000`), test250 on 6 harnesses |
+| `train_grpo.sh` | trainer launcher (wraps `smoldataenvs/pirl/grpo.py`) |
+| `run_test250_p7.sh` | test250 evaluation of one adapter on one harness |
+| `restart_vllm.sh`, `runtime_vllm_worker.py` | FP8 vLLM server with runtime patches |
+| `serve_harbor.py`, `prime_agent_harness.py` | Harbor sandbox server with runtime patches (tool-output cap, Pi tool allowlist, Prime Agent seam) |
 | `grader_v3.py`, `prepare_eval.py`, `prefetch_data.py` | fixed grader and task-data preparation |
-| `manifests/` | task lists: `train798`, `train_e2`, `val118`, ... |
-| `sandbox_image/` | sandbox Dockerfiles (`Dockerfile.mh` = all harnesses preinstalled) |
-| `analysis/` | analysis scripts (`merge_r4.py`, `category_overlap.py`, `plot_readme.py`, failure reviews) |
-| `docs/plots/` | README figures (training curves, test250 results) |
-| `smoldataenvs/` | snapshot of our SmolDataEnvs training code: `pirl/` (GRPO trainer, rewards, evaluator), tests |
-| `EXPERIMENTS.md`, `FINDINGS.md`, `PLAN.md` | experiment log, flaws found, plan history |
+| `manifests/` | task lists: `train1000` (training), `val118` (validation) |
+| `sandbox_image/Dockerfile.mh` | sandbox image with all harnesses preinstalled |
+| `analysis/failure_buckets.py`, `analysis/tool_audit.py` | test250 failure modes; OpenCode timeout / killed-command audit |
+| `smoldataenvs/` | the SmolDataEnvs training code p12 runs: `pirl/` (GRPO trainer, rewards, evaluator, vLLM serving), tests |
+| `EXPERIMENTS.md` | experiment log |
 
-Not in git (see `.gitignore`): `runs/` (rollouts, logs, checkpoints; 117 GB), `results/` (eval summary JSONs),
+Not in git (see `.gitignore`): `runs/` (rollouts, logs, checkpoints), `results/` (eval summary JSONs),
 `prepared*/` (task data), model weights.
 
 ## Reproducing
@@ -133,12 +146,11 @@ MiMo_rl/
 ```
 
 ```bash
-# vLLM at 24k with thinking on, FP8 KV, prefix chaining
-PIRL_THINKING=1 MAX_LEN=24576 CHAIN=1 SEQS=64 KV=fp8 LORA_RANK=64 ./restart_vllm.sh
 # sandbox image with all harnesses
 docker build -f sandbox_image/Dockerfile.mh -t pirl/sandbox:pi-mh2 sandbox_image
 docker tag pirl/sandbox:pi-mh2 savatar101/env-data-agent-train:base
-# train p8 (in tmux), then evaluate
-./run_train_mh.sh 200
-HARNESS=codex RPT=4 ./run_test250_p7.sh my_label p8u200 runs/p8_mh/checkpoint-200/adapter
+# p12 epoch 1 (starts Harbor and vLLM itself; run in tmux), then epoch 2; each ends with test250 on 6 harnesses
+EPOCH_STOP=1000 ./run_train_p12.sh
+EPOCH_STOP=2000 ./run_train_p12.sh
+# stop: touch runs/p12_mh4_r32/STOP; resume: re-run the same command
 ```
