@@ -25,6 +25,34 @@ test250 (the blog's test split), pass@1, 1 attempt per task (about ±3 points). 
   (+0.8 to +5.2) are within 1-attempt noise; a 4-attempt run is needed to confirm them.
 - Pi used only `bash` in e1 and `bash` + `read` from e2, so Pi e1 is not directly comparable.
 
+![test250 pass@1 by epoch](plots/p12_test250.png)
+
+## Training
+
+**Training was stable for all 183 updates (3 epochs).** No collapse, no divergence, no rollbacks.
+
+![p12 training stability](plots/p12_stability.png)
+
+| Signal | Range over 183 updates | Reading |
+|---|---|---|
+| Gradient norm | 0.04-0.11 (median 0.085); one spike to 0.27 at u127 | flat band, the spike did not repeat |
+| KL to sampler policy | 0.006-0.011 | flat; comes from the one-update lag of async generation |
+| Importance ratio | 0.999-1.002 | the FP8 sampler and the trainer agree; TIS caps only 0.2% of tokens |
+| Clipped tokens | 2-5% | slow rise with the lr restart in e3, still small |
+| Token entropy | 0.22 (first 10 updates) -> 0.39 (last 10) | rising, not collapsing: the policy keeps exploring |
+| Learning rate | cosine from 3e-5; e3 re-spans the schedule to 300 updates | the jump at u128 is that re-span, not a restart |
+
+![p12 training behaviour](plots/p12_behaviour.png)
+
+- Training accuracy rises in e1 (Prime Agent from about 0.1 to 0.45, the others to 0.5-0.6), then stays level:
+  from e2 on, tasks solved 8/8 earlier are skipped, so later batches are harder by construction. Test scores
+  (above) keep rising.
+- Invented-tool calls fall from about 3 per rollout to about 0.02 within 35 updates and stay there.
+- Tool calls per rollout fall from about 13 to 7 in e1 and stay there.
+- Pi's capped tool outputs (whole files dumped into the context) fall from about 1.1 to 0.3 per rollout over e2-e3.
+
+Plots: `python3 analysis/plot_p12.py` (reads `runs/p12_mh4_r32/metrics.jsonl` and `results/`).
+
 ## Method
 
 | Part | Setting |
