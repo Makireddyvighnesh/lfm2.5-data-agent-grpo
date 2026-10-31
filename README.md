@@ -1,144 +1,130 @@
-# Data Agent RL: LFM2.5-2.6B trained with GRPO on a single L4
+# Data Agent RL: LFM2.5-2.6B trained with GRPO on one L4
 
-We RL-trained **LiquidAI/LFM2.5-2.6B** (rev `654f9463`) to act as a data-analysis agent on the
-FineEnvs / SmolDataEnvs data-agent tasks (Kaggle datasets plus a question; the agent explores the files
-with code inside a sandbox and writes one answer). The goal was to match or beat the reference
-multi-harness RL result (Adithya's blog) under much tighter hardware: **one NVIDIA L4 (23 GB)**,
-FP8 sampling and training, a 24k context window instead of 128k, and no prompt hints.
+RL training of **LiquidAI/LFM2.5-2.6B** (rev `654f9463`) as a data-analysis agent on the FineEnvs / SmolDataEnvs
+data-agent tasks: each task gives Kaggle data files and a question; the agent explores the files with code in a
+sandbox and writes one answer, which a grader checks.
 
-Full experiment log: [EXPERIMENTS.md](EXPERIMENTS.md). This repo holds the scripts for the current run, p12
-(see [Current run: p12](#current-run-p12)); scripts of earlier runs (p3-p11) are not included.
-LoRA weights (not in this repo): [makireddyvighnesh/lfm2.5-2.6b-data-agent-lora](https://huggingface.co/makireddyvighnesh/lfm2.5-2.6b-data-agent-lora) (private; root = p8 u200, `p9_u120/`).
+Constraints: **one NVIDIA L4 (23 GB)** for both sampling and training, FP8 base weights, 24k context
+(the reference blog uses 128k), thinking off, no prompt hints.
 
-## Headline results (test250, the blog's test split)
+## Results
 
-pass@1. r4 = 4 attempts per task (1,000 per cell, about ±1.5 pts); r1 = 1 attempt (about ±3 pts).
+test250 (the blog's test split), pass@1, 1 attempt per task (about ±3 points). Best run: **p12 epoch 3**.
 
-| Harness | Trained on it? | p7 u350 (pi-only RL) | **p8 u200 (best)** | p9 u120 (epoch 2) | Blog multi-harness (128k) |
+| Harness | Trained on it? | p12 e1 | p12 e2 | **p12 e3** | Blog multi-harness (128k) |
 |---|---|---|---|---|---|
-| Pi (bash only) | yes | 61.6 (r1) | **61.0** (r4) | 60.9 (r4) | - |
-| mini-swe-agent | yes | 64.0 (r1) | **64.1** (r4) | 63.6 (r4) | 64.8 |
-| Codex CLI | yes | 39.6 (r1) | **57.2** (r4) | 54.1 (r4) | 53.6 |
-| OpenCode | no | 44.4 (r1) | not run | 50.8 (r1) | 49.6 |
-| Claude Code | no | (see EXPERIMENTS.md) | not run | 52.4 (r1) | 48.8 |
+| OpenCode | no (held out) | 37.2 | 45.6 | **52.0** | 49.6 |
+| Claude Code | no (held out) | 47.2 | 51.6 | **54.0** | 48.8 |
+| Pi | yes | 58.8 | 55.2 | **60.8** | - |
+| mini-swe-agent | yes | 59.6 | 63.6 | **65.6** | 64.8 |
+| Codex CLI | yes | 52.4 | 54.4 | **56.8** | 53.6 |
+| Prime Agent | yes | 47.2 | 54.2 | **56.4** | - |
 
-- A 2.6B model at 24k context matches the blog on mini-swe-agent and **beats it on Codex (+3.6), OpenCode
-  (+1.2, p9) and Claude Code (+3.6, p9)**.
-- Multi-harness training (p8) fixed the weak harness: Codex +17.6 over p7 (43 tasks gained / 8 lost on r1),
-  submit rate 63% -> 88%, peak context 14.8k -> 12.3k, without hurting Pi or mini-swe-agent.
-- It also transfers to harnesses never trained on: OpenCode +6.4 over p7.
-- Epoch 2 (p9) did not help: flat on Pi and mini-swe-agent, Codex -3.1 ± 2.5. **p8 u200 is the best checkpoint.**
-
-Val118 (our own 118-task holdout from the eval split), Pi, r1: base 39.8 (thinking on), p7 u350 53.4, p8 u200 60.2.
-
-## Training curves
-
-p8 (epoch 1, updates 1-200) and p9 (epoch 2, updates 201-320).
-
-- Codex, the harness the starting checkpoint was weakest on, climbs from about 60% to 75-80% during epoch 1.
-- Epoch 2 batches are harder by construction (only tasks not solved 8/8), so its raw accuracy drops; on the same
-  tasks epoch 2 still beat epoch 1 by 5-11 points per window, but test250 showed no gain.
-
-- Reward follows accuracy (correct answers earn 1 plus up to 0.2 in efficiency bonuses).
-- Peak context falls from about 9k to 7.5k tokens and tool calls from about 9 to 8 during epoch 1, as the
-  efficiency bonuses intend; both rise again on the harder epoch-2 tasks.
-- Gradient norm stays in a narrow 0.06-0.10 band: no instability or collapse in either epoch.
+- Epoch 3 is the best checkpoint on all six harnesses.
+- It is above the blog on all four harnesses the blog reports, including the two it never trained on. The margins
+  (+0.8 to +5.2) are within 1-attempt noise; a 4-attempt run is needed to confirm them.
+- Pi used only `bash` in e1 and `bash` + `read` from e2, so Pi e1 is not directly comparable.
 
 ## Method
 
-- **Algorithm:** GRPO, LoRA r16 / alpha 32 on a frozen FP8 base, 4 tasks x 8 rollouts per update, advantage
-  std floor 0.1, truncated importance sampling (cap 2) to correct the FP8 vLLM sampler vs trainer mismatch.
-  Each multi-turn rollout trains as one prefix-chained sequence. Thinking (`<think>`) on.
-- **One GPU for everything:** vLLM sampler (FP8 weights, FP8 KV, sleep mode) and the trainer share the L4;
-  rollouts stream (`--stream-groups 2`) so generation overlaps grading. About 5-6 min per update.
-- **Harnesses (p8):** Pi (bash tool only), mini-swe-agent 2.4.6, Codex CLI 0.163.0, rotated per task
-  (all 8 rollouts of a task use the same harness), all run through Harbor sandboxes with a capture proxy
-  that records exact token ids and caps every model call at 4,096 output tokens.
-- **Reward (`tool_ctx`):** wrong = 0; correct = 1 + 0.1 x 15/(15 + tool calls) + 0.1 if the rollout's own
-  context (peak minus first prompt) stayed within 15k. Bonuses only for correct answers.
-- **Data:** 798 training tasks (the 1,000-task pool minus 202 never solved); learning rate 3e-5 cosine,
-  10 warmup steps, 200 updates = one pass over the tasks. Started from the p7 u350 adapter.
+| Part | Setting |
+|---|---|
+| Algorithm | GRPO, fresh LoRA r32 / alpha 64 on the frozen FP8 base; 8 tasks x 8 rollouts per update; advantage std floor 0.1 |
+| Off-policy fix | truncated importance sampling (cap 2) for the FP8 vLLM sampler vs trainer mismatch |
+| Sampling | DAPO dynamic sampling (drop groups with no reward spread), async generation (14 groups in flight) |
+| Task selection | 1,000 training tasks; solved tasks skipped (25% revisited in e3), 50% of all-wrong revisits skipped, extra probes for hard tasks |
+| Harnesses | Pi, mini-swe-agent, Codex, Prime Agent (rotated per task); OpenCode and Claude Code held out for testing |
+| Sandbox | Harbor sandboxes; a capture proxy records exact token ids, caps each model call at 4,096 tokens and each tool output at 4,000 chars |
+| Schedule | lr 3e-5 cosine (warmup 10, floor 3e-6); 1 epoch = 1,000 task positions; e1 u1-71, e2 u72-127, e3 u128-183 |
+| Hardware | one L4: vLLM (FP8 weights, FP8 KV cache, sleep mode) and the trainer share the GPU; about 8.5 min per update |
 
-## Run history
+### Reward (epoch 3: `tool_ctx_read2`)
 
-| Run | What changed | Result |
+```
+wrong or no answer:  0                                                        - unknown-tool penalty
+correct answer:      1 + tool bonus + own-context bonus - capped-output penalty - unknown-tool penalty
+```
+
+| Term | Value | Purpose |
 |---|---|---|
-| base | LFM2.5-2.6B, thinking on | val118 39.8 |
-| p3-p5 | tool-call bonus, peak-context bonus, tool-output cap | val118 up to 48.3 (r4) |
-| p6 | LoRA r16, 1000 tasks, time/token-shaped reward, 10-min cap | test250 56.0 |
-| p7 | + thinking, Pi bash-only, turn cap 25, drop never-solved tasks | test250 61.6 (Pi) |
-| sd_p7 | SFT on p7's own correct rollouts | test250 58.0 (not better) |
-| **p8** | **+ Pi / mini-swe-agent / Codex, 24k, `tool_ctx` reward** | **best: see table** |
-| p9 | epoch 2 on the 477 tasks not solved 8/8 | no gain, Codex -3.1 |
+| Tool bonus | 0.1 x 15 / (15 + tool calls) | fewer, better tool calls |
+| Own-context bonus | 0.1 at <= 4k own tokens, falling to 0 at 12k (own = peak context - first prompt) | keep the context small |
+| Capped-output penalty | 0.05 per tool output cut by the 4,000-char cap, max 0.2 | read slices, not whole files |
+| Unknown-tool penalty | 0.1 per call to a tool the harness does not offer, max 0.3 | use the tools the harness gives |
+
+A correct answer always scores at least 0.5 and a wrong one at most 0, so correctness dominates. The efficiency terms
+only rank correct answers against each other, and penalties never make a wrong answer look better.
+
+| Epoch | Reward | Change |
+|---|---|---|
+| e1 | `tool_ctx_err` | tool bonus, flat context bonus, unknown-tool penalty |
+| e2 | `tool_ctx_read` | + capped-output penalty, graded context bonus, Pi gets `read` |
+| e3 | `tool_ctx_read2` | capped-output penalty on correct answers only; keep all-correct groups with reward spread >= 0.03; lr schedule over 300 updates |
 
 ## Findings
 
 **What worked**
-- Thinking on: +8.9 points at base on val118.
-- Pi with only a bash tool: full-file `read` dropped from 90% to 0% of rollouts, which removed most context blowups.
-- Rewarding efficiency only on correct answers (tool-call and context bonuses): shorter, faster solutions without
-  trading off accuracy.
-- Dropping never-solved tasks: removes all-zero groups (no gradient) and many tasks with bad gold answers.
-- Training on several harnesses: big gains on the weakest harness and transfer to unseen harnesses.
+- Training on several harnesses transfers to harnesses never trained on (OpenCode +14.8, Claude Code +6.8 from e1 to e3).
+- Penalising unknown tool calls: invented-tool calls in training fell from about 3 to about 0.02 per rollout; on
+  Claude Code they now cost no points.
+- Capped-output penalty on correct answers only: Pi rollouts with a capped output fell from 60% to 31% during e3
+  while Pi accuracy rose (test250 55.2 to 60.8) and tool calls and submit rate held.
+- Rewarding efficiency only on correct answers: shorter, cheaper solutions without trading off accuracy.
 - Pre-installing every harness in the sandbox image (per-rollout installs time out under concurrency).
 
-**What did not work**
-- More updates or epochs of the same recipe: val118 plateaus after about 200 updates (p5, p6, p7); epoch 2 (p9)
-  gave nothing and slightly hurt Codex.
-- Self-distillation on the model's own correct rollouts (sd_p7): close to p7, not better.
-- A tool-output cap without a context cost: the model kept reading whole files.
-- Deciding from r1 val118: same-model reruns flip about 18% of tasks, so 1-attempt differences under about
-  5 points are noise. All final claims use r4 on test250.
+**What did not work (earlier runs, see EXPERIMENTS.md)**
+- Epoch 2 of the same recipe without changes (p9): no gain.
+- Self-distillation on the model's own correct rollouts: not better than RL.
+- A tool-output cap without a cost: the model kept reading whole files.
+- Removing a tool to stop its misuse (bash-only Pi): stops full-file reads on that harness only; the model does
+  not learn to read selectively.
 
-**Benchmark caveats**
-- The pinned grader has false positives and false negatives (about 3.8% error vs blind judges); some tasks are
-  unanswerable or under-specified. These affect the blog's numbers and ours equally.
-- "Held-out" test tasks are new questions, but some reuse the same data files as training (no task, notebook or
-  question overlap).
-- Our comparison with the blog differs in context (24k vs 128k) and thinking (on vs off).
+**Remaining losses on test250 (e3)**
+- Claude Code: 43 of 250 rollouts run out of context (about 11 points). The fixed prompt takes about 10.8k of the
+  24k, and the model writes long visible reasoning messages (some over 8k chars) even with thinking off.
+- OpenCode: 57 rollouts pass a bash timeout in seconds where OpenCode expects milliseconds, so the command is killed
+  (about 7 points; was 186 rollouts in e1).
+- Pi: 18 rollouts end without writing an answer (about 5 points).
 
-## Current run: p12
+**Caveats**
+- The pinned grader has about 3.8% error vs blind judges, and some tasks are under-specified. This affects the blog's
+  numbers and ours equally.
+- Test tasks are new questions, but some reuse data files seen in training.
+- 1-attempt differences under about 5 points are within noise (same-model reruns flip about 18% of tasks).
 
-`p12_mh4_r32`: fresh LoRA r32 on the base model, thinking off, 1000 training tasks, 8 tasks x 8 rollouts,
-24k context, FP8 + TIS cap 2, DAPO dynamic sampling. Training harnesses: Pi, mini-swe-agent, Codex, Prime Agent;
-OpenCode and Claude Code are held out (test only). Reward `tool_ctx_err` in epoch 1 (penalty for calling tools the
-harness did not offer); from epoch 2, `tool_ctx_read` (adds a penalty for tool outputs cut by the 4,000-char proxy
-cap and a graded own-context bonus) with Pi's `read` tool enabled. Epoch 3 (prepared, not yet run): `tool_ctx_read2` (capped-output penalty on correct
-answers only), 25% revisit of solved tasks, LR schedule over 300 updates. Details in EXPERIMENTS.md.
+## Run history
 
-test250 r1 pass@1:
-
-| Harness | Trained on it? | p12 e1 (u71) | p12 e2 (u127) |
-|---|---|---|---|
-| OpenCode | no | 37.2 | 45.6 |
-| Claude Code | no | 47.2 | 51.6 |
-| Pi | yes | 58.8 (bash only) | 55.2 (bash + read) |
-| mini-swe-agent | yes | 62.9 | 63.6 |
-| Codex CLI | yes | 52.4 | 54.4 |
-| Prime Agent | yes | 47.2 | 54.2 |
+| Run | Change | Result (test250) |
+|---|---|---|
+| p6 | LoRA r16, 1,000 tasks, time/token-shaped reward | Pi 56.0 |
+| p7 | thinking on, Pi bash-only, drop never-solved tasks | Pi 61.6 |
+| p8 | + mini-swe-agent and Codex, `tool_ctx` reward | Pi 61.0, mini 64.1, Codex 57.2 (4 attempts) |
+| p9 | epoch 2 of p8 | no gain; OpenCode 50.8, Claude Code 52.4 |
+| p10-p11 | + Prime Agent, unknown-tool penalty | stopped early; fixes carried into p12 |
+| **p12** | **fresh start, thinking off, all fixes, 3 epochs** | **best on held-out harnesses; see Results** |
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `run_train_p12.sh` | p12 pipeline: Harbor + vLLM startup, training per epoch (`EPOCH_STOP=1000/2000/3000`), test250 on 6 harnesses |
+| `run_train_p12.sh` | full pipeline: Harbor + vLLM startup, one epoch of training (`EPOCH_STOP=1000/2000/3000`), test250 on 6 harnesses |
 | `train_grpo.sh` | trainer launcher (wraps `smoldataenvs/pirl/grpo.py`) |
 | `run_test250_p7.sh` | test250 evaluation of one adapter on one harness |
 | `restart_vllm.sh`, `runtime_vllm_worker.py` | FP8 vLLM server with runtime patches |
-| `serve_harbor.py`, `prime_agent_harness.py` | Harbor sandbox server with runtime patches (tool-output cap, Pi tool allowlist, Prime Agent seam) |
+| `serve_harbor.py`, `prime_agent_harness.py` | Harbor sandbox server (tool-output cap, Pi tool allowlist, Prime Agent) |
 | `grader_v3.py`, `prepare_eval.py`, `prefetch_data.py` | fixed grader and task-data preparation |
-| `manifests/` | task lists: `train1000` (training), `val118` (validation) |
+| `manifests/` | task lists: `train1000`, `val118` |
 | `sandbox_image/Dockerfile.mh` | sandbox image with all harnesses preinstalled |
-| `analysis/failure_buckets.py`, `analysis/tool_audit.py` | test250 failure modes; OpenCode timeout / killed-command audit |
-| `smoldataenvs/` | the SmolDataEnvs training code p12 runs: `pirl/` (GRPO trainer, rewards, evaluator, vLLM serving), tests |
-| `EXPERIMENTS.md` | experiment log |
+| `analysis/failure_buckets.py`, `analysis/tool_audit.py` | test250 failure modes; OpenCode timeout audit |
+| `smoldataenvs/` | training code: `pirl/` (GRPO trainer, rewards, evaluator, vLLM serving) and tests |
+| `EXPERIMENTS.md` | full experiment log |
 
-Not in git (see `.gitignore`): `runs/` (rollouts, logs, checkpoints), `results/` (eval summary JSONs),
-`prepared*/` (task data), model weights.
+Not in git: `runs/` (rollouts, logs, checkpoints), `results/` (eval JSONs), `prepared*/` (task data), model weights.
+Earlier LoRA weights (p8, p9; private): [makireddyvighnesh/lfm2.5-2.6b-data-agent-lora](https://huggingface.co/makireddyvighnesh/lfm2.5-2.6b-data-agent-lora).
 
 ## Reproducing
 
-The scripts expect this layout on the training machine (paths are relative to this folder):
+Expected layout on the training machine:
 
 ```
 MiMo_rl/
@@ -150,10 +136,9 @@ MiMo_rl/
 # sandbox image with all harnesses
 docker build -f sandbox_image/Dockerfile.mh -t pirl/sandbox:pi-mh2 sandbox_image
 docker tag pirl/sandbox:pi-mh2 savatar101/env-data-agent-train:base
-# p12 epoch 1 (starts Harbor and vLLM itself; run in tmux), then epoch 2; each ends with test250 on 6 harnesses
+# one epoch each (run in tmux); each starts Harbor and vLLM, trains, then runs test250 on 6 harnesses
 EPOCH_STOP=1000 ./run_train_p12.sh
 EPOCH_STOP=2000 ./run_train_p12.sh
-# epoch 3: tool_ctx_read2 reward, 300-update LR schedule, keeps all-correct groups with reward spread >= 0.03
 EPOCH_STOP=3000 ./run_train_p12.sh
 # stop: touch runs/p12_mh4_r32/STOP; resume: re-run the same command
 ```

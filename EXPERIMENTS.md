@@ -415,3 +415,20 @@ No pipeline bug found: same grader, Harbor config and 24k window as the p8 evals
   - grpo.py: skip decision moved into skip_reason() (same behaviour at --solved-revisit-frac 0). 70 tests pass.
   - Review findings checked and rejected: "mini-swe-agent observations are role user, never capped" (they are role
     tool; 152/752 e2 mini rollouts had capped outputs); "Not Applicable answers rose on OpenCode" (79 -> 47).
+- Epoch 3 ran 2026-10-30 10:51-18:47 UTC (u128-u183, task positions 2000-3000; ~8.5 min/update), evals done 21:15.
+  Training: lr 2.05e-5 -> ~1.3e-5; grad norm 0.06-0.13, KL ~0.01 (as e2). Pi capped outputs/rollout 0.66 (e2 end)
+  -> 0.34 (u163-174); Pi rollouts with >=1 capped output 60% -> 31%, accuracy with none 6-11 pts above with some;
+  Pi tool calls (~6.3) and submit rate (0.86 -> 0.91) did not fall, so no sign of the penalty teaching "look less".
+- Epoch-3 test250 r1 (p12e3), e1 / e2 / e3: OpenCode 37.2 / 45.6 / 52.0, Claude Code 47.2 / 51.6 / 54.0,
+  Pi 58.8 / 55.2 / 60.8, mini-swe-agent 59.6 / 63.6 / 65.6, Codex 52.4 / 54.4 / 56.8, Prime Agent 47.2 / 54.2 / 56.4.
+  Best of p12 on every harness. Note: the e1 mini-swe-agent figure above (62.9) does not match the saved
+  result file (59.6); the file value is used from here on.
+  - OpenCode: timeout-kill rollouts 186 -> 133 -> 57 (still ~7 pts); peak context 13.2k -> 12.0k; tools 8.8 -> 7.1.
+  - Claude Code: context-out 31 -> 30 -> 43 rollouts (11.3 pts, the largest loss). In e3 these rollouts have fewer
+    tool calls (14.4 -> 11.1) but more generated tokens (5.6k -> 7.9k); 30 of 43 contain one message > 8k chars
+    (e2: 11 of 30): long visible reasoning ("Actually...", "Wait, but...", stray </think>) with thinking off. The
+    ~10.8k fixed prompt leaves ~13k, so 3-4 such messages exhaust it. Invented tools (Python 31, ToolExecute 18)
+    in 57 rollouts now cost nothing (pass 0.68 = clean pass 0.68; e2 cost 2.8 pts).
+  - Pi: 18 rollouts with no answer written (~5 pts).
+  - Candidate for epoch 4 (not implemented): penalise long text-only messages (e.g. > 1.5k tokens of prose), on
+    correct answers too; or lower the training per-call output cap 4096 -> 2048.
