@@ -38,7 +38,7 @@ test250 (the blog's test split), pass@1, 1 attempt per task (about ±3 points). 
 | Gradient norm | 0.04-0.11 (median 0.085); one spike to 0.27 at u127 | flat band, the spike did not repeat |
 | KL to sampler policy | 0.006-0.011 | flat; comes from the one-update lag of async generation |
 | Importance ratio | 0.999-1.002 | the FP8 sampler and the trainer agree; TIS caps only 0.2% of tokens |
-| Clipped tokens | 2-5% | slow rise with the lr restart in e3, still small |
+| Tokens outside the PPO clip range | 2-5% | diagnostic only (the TIS loss does not clip); rises with the higher e3 lr, still small |
 | Token entropy | 0.22 (first 10 updates) -> 0.39 (last 10) | rising, not collapsing: the policy keeps exploring |
 | Learning rate | cosine from 3e-5; e3 re-spans the schedule to 300 updates | the jump at u128 is that re-span, not a restart |
 
@@ -58,7 +58,7 @@ Plots: `python3 analysis/plot_p12.py` (reads `runs/p12_mh4_r32/metrics.jsonl` an
 | Part | Setting |
 |---|---|
 | Algorithm | GRPO, fresh LoRA r32 / alpha 64 on the frozen FP8 base; 8 tasks x 8 rollouts per update; advantage std floor 0.1 |
-| Off-policy fix | truncated importance sampling (cap 2) for the FP8 vLLM sampler vs trainer mismatch |
+| Off-policy fix | truncated importance sampling: each token weighted by min(π_train / π_sampler, 2), for stale async samples and the FP8 sampler vs trainer mismatch; no PPO clipping (one gradient step per batch) |
 | Sampling | DAPO dynamic sampling (drop groups with no reward spread), async generation (14 groups in flight) |
 | Task selection | 1,000 training tasks; solved tasks skipped (25% revisited in e3), 50% of all-wrong revisits skipped, extra probes for hard tasks |
 | Harnesses | Pi, mini-swe-agent, Codex, Prime Agent (rotated per task); OpenCode and Claude Code held out for testing |

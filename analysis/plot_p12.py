@@ -74,7 +74,7 @@ def stability(rows):
     panel(axs[0, 1], rows, "kl", "KL to sampler policy", ylim=(0, None))
     panel(axs[0, 2], rows, "entropy", "Token entropy", ylim=(0, None))
     panel(axs[1, 0], rows, "ratio_mean", "Importance ratio (mean)", ylim=(0.99, 1.01))
-    panel(axs[1, 1], rows, "clip_frac", "Clipped token fraction", ylim=(0, None))
+    panel(axs[1, 1], rows, "clip_frac", "Outside PPO clip range (diagnostic)", ylim=(0, None))
     panel(axs[1, 2], rows, "lr", "Learning rate", raw=False, ylim=(0, None))
     for ax in axs[1]: ax.set_xlabel("update")
     fig.suptitle("p12 training stability (light: per update, dark: 10-update mean)", x=0.01, ha="left", fontsize=12)
