@@ -116,9 +116,9 @@ def test250():
         if h in blog:
             ax.plot([i - 0.45, i + 0.45], [blog[h]] * 2, color=INK, lw=1.5, ls=(0, (4, 2)))
     ax.plot([], [], color=INK, lw=1.5, ls=(0, (4, 2)), label="blog (128k context)")
-    ax.set_xticks(range(len(hs)), names); ax.set_ylim(0, 75); ax.set_ylabel("pass@1 (%)")
+    ax.set_xticks(range(len(hs)), names); ax.set_ylim(35, 70); ax.set_ylabel("pass@1 (%)")
     ax.grid(axis="x", visible=False); ax.legend(frameon=False, ncol=4, loc="upper left")
-    ax.set_title("test250 pass@1 by epoch (1 attempt per task, about ±3 pts; * = never trained on)", loc="left")
+    ax.set_title("test250 pass@1 by epoch (axis starts at 35%; 1 attempt per task, about ±3 pts; * = never trained on)", loc="left")
     fig.savefig(f"{OUT}/p12_test250.png", dpi=130); plt.close(fig)
 
 

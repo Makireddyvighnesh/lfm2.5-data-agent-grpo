@@ -5,7 +5,7 @@ data-agent tasks: each task gives Kaggle data files and a question; the agent ex
 sandbox and writes one answer, which a grader checks.
 
 Constraints: **one NVIDIA L4 (23 GB)** for both sampling and training, FP8 base weights, 24k context
-(the reference blog uses 128k), thinking off, no prompt hints.
+(the reference [multi-harness RL blog](https://huggingface.co/spaces/FineEnvs/multi-harness-rl) uses 128k), thinking off, no prompt hints.
 
 ## Results
 
@@ -170,3 +170,14 @@ EPOCH_STOP=2000 ./run_train_p12.sh
 EPOCH_STOP=3000 ./run_train_p12.sh
 # stop: touch runs/p12_mh4_r32/STOP; resume: re-run the same command
 ```
+
+## Acknowledgements
+
+- **Adithya's [multi-harness RL blog](https://huggingface.co/spaces/FineEnvs/multi-harness-rl)** (FineEnvs) is the reference this work builds on and compares against:
+  the idea of training one model across several agent harnesses, the test250 split, the blog scores in the tables
+  above, and the tool-efficiency reward term (0.1 x 15 / (15 + tool calls)).
+- **Open-source data and docs:** the FineEnvs / SmolDataEnvs data-agent tasks and grader, their documentation, and
+  the open-source harnesses (Pi, mini-swe-agent, Codex CLI, Prime Agent, OpenCode, Claude Code) and Harbor sandboxes.
+- **Our own work:** the single-L4 FP8 training setup, the training runs and experiments (p3-p12), the reward
+  changes (unknown-tool penalty, capped-output penalty, graded context bonus), the task-selection rules, the
+  grader fixes, and all analysis in this repo and EXPERIMENTS.md.
