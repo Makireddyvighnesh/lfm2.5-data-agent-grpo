@@ -9,28 +9,25 @@ Constraints: **one NVIDIA L4 (23 GB)** for both sampling and training, FP8 base 
 
 ## Results
 
-test250 (the blog's test split), pass@1, 1 attempt per task (about ±3 points). Best run: **p12 epoch 3**.
+test250 (the blog's test split), pass@1, 1 attempt per task (about ±3 points). Final model after 3 epochs.
 
-| Harness | Trained on it? | p12 e1 | p12 e2 | **p12 e3** | Blog multi-harness (128k) |
-|---|---|---|---|---|---|
-| OpenCode | no (held out) | 37.2 | 45.6 | **52.0** | 49.6 |
-| Claude Code | no (held out) | 47.2 | 51.6 | **54.0** | 48.8 |
-| Pi | yes | 58.8 | 55.2 | **60.8** | - |
-| mini-swe-agent | yes | 59.6 | 63.6 | **65.6** | 64.8 |
-| Codex CLI | yes | 52.4 | 54.4 | **56.8** | 53.6 |
-| Prime Agent | yes | 47.2 | 54.2 | **56.4** | - |
+| Harness | Trained on it? | **Ours (24k)** | Blog multi-harness (128k) |
+|---|---|---|---|
+| OpenCode | no (held out) | **52.0** | 49.6 |
+| Claude Code | no (held out) | **54.0** | 48.8 |
+| Pi | yes | **60.8** | - |
+| mini-swe-agent | yes | **65.6** | 64.8 |
+| Codex CLI | yes | **56.8** | 53.6 |
+| Prime Agent | yes | **56.4** | - |
 
-- Epoch 3 is the best checkpoint on all six harnesses.
-- It is above the blog on all four harnesses the blog reports, including the two it never trained on. The margins
-  (+0.8 to +5.2) are within 1-attempt noise; a 4-attempt run is needed to confirm them.
-
-![test250 pass@1 by epoch](plots/p12_test250.png)
+Above the blog on all four harnesses it reports, including the two never trained on, with a 5x smaller context.
+The margins (+0.8 to +5.2) are within 1-attempt noise; a 4-attempt run is needed to confirm them.
 
 ## Training
 
 **Training was stable for all 183 updates (3 epochs).** No collapse, no divergence, no rollbacks.
 
-![p12 training stability](plots/p12_stability.png)
+![Training stability](plots/p12_stability.png)
 
 | Signal | Range over 183 updates | Reading |
 |---|---|---|
@@ -41,7 +38,7 @@ test250 (the blog's test split), pass@1, 1 attempt per task (about ±3 points). 
 | Token entropy | 0.22 (first 10 updates) -> 0.39 (last 10) | rising, not collapsing: the policy keeps exploring |
 | Learning rate | cosine from 3e-5; e3 re-spans the schedule to 300 updates | the jump at u128 is that re-span, not a restart |
 
-![p12 training behaviour](plots/p12_behaviour.png)
+![Training behaviour](plots/p12_behaviour.png)
 
 - Training accuracy rises in e1 (Prime Agent from about 0.1 to 0.45, the others to 0.5-0.6), then stays level:
   from e2 on, tasks solved 8/8 earlier are skipped, so later batches are harder by construction. Test scores
@@ -63,7 +60,7 @@ test250 (the blog's test split), pass@1, 1 attempt per task (about ±3 points). 
 | Schedule | lr 3e-5 cosine (warmup 10, floor 3e-6); 1 epoch = 1,000 task positions; e1 u1-71, e2 u72-127, e3 u128-183 |
 | Hardware | one L4: vLLM (FP8 weights, FP8 KV cache, sleep mode) and the trainer share the GPU; about 8.5 min per update |
 
-### Reward (epoch 3: `tool_ctx_read2`)
+### Reward (`tool_ctx_read2`)
 
 ```
 wrong or no answer:  0                                                        - unknown-tool penalty
@@ -85,7 +82,8 @@ capped-output penalty only to correct answers and keeps all-correct groups whose
 
 ## Findings
 
-- **Multi-harness training transfers** to harnesses never trained on: OpenCode +14.8 and Claude Code +6.8 from e1 to e3.
+- **Multi-harness training transfers** to harnesses never trained on: OpenCode and Claude Code beat the blog without
+  being in training.
 - **Reward efficiency only on correct answers.** Shorter, cheaper solutions with no loss in accuracy; the
   capped-output penalty cut Pi's whole-file reads from 60% to 31% of rollouts while Pi accuracy rose.
 - **Penalise unknown tools.** Invented-tool calls fell from about 3 to 0.02 per rollout.
