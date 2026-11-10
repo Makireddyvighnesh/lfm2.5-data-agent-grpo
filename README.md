@@ -23,7 +23,6 @@ test250 (the blog's test split), pass@1, 1 attempt per task (about ±3 points). 
 - Epoch 3 is the best checkpoint on all six harnesses.
 - It is above the blog on all four harnesses the blog reports, including the two it never trained on. The margins
   (+0.8 to +5.2) are within 1-attempt noise; a 4-attempt run is needed to confirm them.
-- Pi used only `bash` in e1 and `bash` + `read` from e2, so Pi e1 is not directly comparable.
 
 ![test250 pass@1 by epoch](plots/p12_test250.png)
 
@@ -50,8 +49,6 @@ test250 (the blog's test split), pass@1, 1 attempt per task (about ±3 points). 
 - Invented-tool calls fall from about 3 per rollout to about 0.02 within 35 updates and stay there.
 - Tool calls per rollout fall from about 13 to 7 in e1 and stay there.
 - Pi's capped tool outputs (whole files dumped into the context) fall from about 1.1 to 0.3 per rollout over e2-e3.
-
-Plots: `python3 analysis/plot_p12.py` (reads `runs/p12_mh4_r32/metrics.jsonl` and `results/`).
 
 ## Method
 
@@ -83,53 +80,23 @@ correct answer:      1 + tool bonus + own-context bonus - capped-output penalty 
 A correct answer always scores at least 0.5 and a wrong one at most 0, so correctness dominates. The efficiency terms
 only rank correct answers against each other, and penalties never make a wrong answer look better.
 
-| Epoch | Reward | Change |
-|---|---|---|
-| e1 | `tool_ctx_err` | tool bonus, flat context bonus, unknown-tool penalty |
-| e2 | `tool_ctx_read` | + capped-output penalty, graded context bonus, Pi gets `read` |
-| e3 | `tool_ctx_read2` | capped-output penalty on correct answers only; keep all-correct groups with reward spread >= 0.03; lr schedule over 300 updates |
+Epochs 1-2 used earlier versions of this reward (`tool_ctx_err`, `tool_ctx_read`); `tool_ctx_read2` applies the
+capped-output penalty only to correct answers and keeps all-correct groups whose reward spread is >= 0.03.
 
 ## Findings
 
-**What worked**
-- Training on several harnesses transfers to harnesses never trained on (OpenCode +14.8, Claude Code +6.8 from e1 to e3).
-- Penalising unknown tool calls: invented-tool calls in training fell from about 3 to about 0.02 per rollout; on
-  Claude Code they now cost no points.
-- Capped-output penalty on correct answers only: Pi rollouts with a capped output fell from 60% to 31% during e3
-  while Pi accuracy rose (test250 55.2 to 60.8) and tool calls and submit rate held.
-- Rewarding efficiency only on correct answers: shorter, cheaper solutions without trading off accuracy.
-- Pre-installing every harness in the sandbox image (per-rollout installs time out under concurrency).
+- **Multi-harness training transfers** to harnesses never trained on: OpenCode +14.8 and Claude Code +6.8 from e1 to e3.
+- **Reward efficiency only on correct answers.** Shorter, cheaper solutions with no loss in accuracy; the
+  capped-output penalty cut Pi's whole-file reads from 60% to 31% of rollouts while Pi accuracy rose.
+- **Penalise unknown tools.** Invented-tool calls fell from about 3 to 0.02 per rollout.
 
-**What did not work (earlier runs, see EXPERIMENTS.md)**
-- Epoch 2 of the same recipe without changes (p9): no gain.
-- Self-distillation on the model's own correct rollouts: not better than RL.
-- A tool-output cap without a cost: the model kept reading whole files.
-- Removing a tool to stop its misuse (bash-only Pi): stops full-file reads on that harness only; the model does
-  not learn to read selectively.
+**Limitations**
+- Remaining test250 losses: Claude Code runs out of the 24k context in 43/250 rollouts (about 11 points); OpenCode
+  passes bash timeouts in seconds instead of milliseconds in 57 rollouts (about 7 points).
+- 1-attempt differences under about 5 points are within noise; the pinned grader has about 3.8% error vs blind judges.
+- Some test tasks reuse data files seen in training.
 
-**Remaining losses on test250 (e3)**
-- Claude Code: 43 of 250 rollouts run out of context (about 11 points). The fixed prompt takes about 10.8k of the
-  24k, and the model writes long visible reasoning messages (some over 8k chars) even with thinking off.
-- OpenCode: 57 rollouts pass a bash timeout in seconds where OpenCode expects milliseconds, so the command is killed
-  (about 7 points; was 186 rollouts in e1).
-- Pi: 18 rollouts end without writing an answer (about 5 points).
-
-**Caveats**
-- The pinned grader has about 3.8% error vs blind judges, and some tasks are under-specified. This affects the blog's
-  numbers and ours equally.
-- Test tasks are new questions, but some reuse data files seen in training.
-- 1-attempt differences under about 5 points are within noise (same-model reruns flip about 18% of tasks).
-
-## Run history
-
-| Run | Change | Result (test250) |
-|---|---|---|
-| p6 | LoRA r16, 1,000 tasks, time/token-shaped reward | Pi 56.0 |
-| p7 | thinking on, Pi bash-only, drop never-solved tasks | Pi 61.6 |
-| p8 | + mini-swe-agent and Codex, `tool_ctx` reward | Pi 61.0, mini 64.1, Codex 57.2 (4 attempts) |
-| p9 | epoch 2 of p8 | no gain; OpenCode 50.8, Claude Code 52.4 |
-| p10-p11 | + Prime Agent, unknown-tool penalty | stopped early; fixes carried into p12 |
-| **p12** | **fresh start, thinking off, all fixes, 3 epochs** | **best on held-out harnesses; see Results** |
+Earlier runs, ablations, and negative results are in [EXPERIMENTS.md](EXPERIMENTS.md).
 
 ## Repository layout
 
@@ -145,10 +112,9 @@ only rank correct answers against each other, and penalties never make a wrong a
 | `sandbox_image/Dockerfile.mh` | sandbox image with all harnesses preinstalled |
 | `analysis/failure_buckets.py`, `analysis/tool_audit.py` | test250 failure modes; OpenCode timeout audit |
 | `smoldataenvs/` | training code: `pirl/` (GRPO trainer, rewards, evaluator, vLLM serving) and tests |
-| `EXPERIMENTS.md` | full experiment log |
+| `EXPERIMENTS.md` | full experiment log (earlier runs, ablations) |
 
 Not in git: `runs/` (rollouts, logs, checkpoints), `results/` (eval JSONs), `prepared*/` (task data), model weights.
-Earlier LoRA weights (p8, p9; private): [makireddyvighnesh/lfm2.5-2.6b-data-agent-lora](https://huggingface.co/makireddyvighnesh/lfm2.5-2.6b-data-agent-lora).
 
 ## Reproducing
 
@@ -169,6 +135,8 @@ EPOCH_STOP=1000 ./run_train_p12.sh
 EPOCH_STOP=2000 ./run_train_p12.sh
 EPOCH_STOP=3000 ./run_train_p12.sh
 # stop: touch runs/p12_mh4_r32/STOP; resume: re-run the same command
+# plots in plots/
+python3 analysis/plot_p12.py
 ```
 
 ## Acknowledgements
@@ -178,6 +146,3 @@ EPOCH_STOP=3000 ./run_train_p12.sh
   above, and the tool-efficiency reward term (0.1 x 15 / (15 + tool calls)).
 - **Open-source data and docs:** the FineEnvs / SmolDataEnvs data-agent tasks and grader, their documentation, and
   the open-source harnesses (Pi, mini-swe-agent, Codex CLI, Prime Agent, OpenCode, Claude Code) and Harbor sandboxes.
-- **Our own work:** the single-L4 FP8 training setup, the training runs and experiments (p3-p12), the reward
-  changes (unknown-tool penalty, capped-output penalty, graded context bonus), the task-selection rules, the
-  grader fixes, and all analysis in this repo and EXPERIMENTS.md.
